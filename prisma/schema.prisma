@@ -1,0 +1,890 @@
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../lib/generated/prisma"
+  previewFeatures = ["postgresqlExtensions"]
+  binaryTargets   = ["native", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [citext]
+}
+
+model ChainState {
+  id              String @id @default(cuid())
+  userAddress     String @db.Citext
+  contract        String @db.Citext
+  lastBlockNumber Int    @default(0)
+
+  @@unique([userAddress, contract], name: "contract_userAddress")
+}
+
+model User {
+  id                 String                 @id @default(cuid())
+  walletAddress      String                 @unique @db.Citext
+  username           String
+  bio                String?
+  profileBanner      String?
+  profileAvatar      String
+  x                  String?
+  instagram          String?
+  website            String?
+  telegram           String?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  collections        Collection[]
+  submissions        CollectionSubmission[]
+  ownedNFTs          NFT[]                  @relation("ownedNFTs")
+  featuredBids       FeaturedBid[]
+  holderRewardsMulti HolderRewardMulti[]
+  rewardClaimLogs    RewardClaimLog[]
+  stolenReports      StolenItem[]           @relation("StolenReporter")
+}
+
+model Collection {
+  id                 String            @id @default(cuid())
+  name               String
+  symbol             String
+  contract           String            @unique @db.Citext
+  description        String?
+  logoUrl            String?
+  coverUrl           String?
+  standard           String            @default("ERC721")
+  supply             Int?
+  baseUri            String?
+  gatewayPref        GatewayPref       @default(PUBLIC)
+  indexStatus        IndexStatus       @default(PENDING)
+  x                  String?
+  instagram          String?
+  website            String?
+  discord            String?
+  telegram           String?
+  floorPrice         Float             @default(0)
+  volume             Float             @default(0)
+  itemsCount         Int               @default(0)
+  ownersCount        Int               @default(0)
+  change24h          Float             @default(0)
+  creatorId          String
+  ownerAddress       String            @db.Citext
+  isOrphan           Boolean           @default(false)
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  assetUploads       AssetUpload[]
+  creator            User              @relation(fields: [creatorId], references: [id])
+  deployment         DeployedContract?
+  nfts               NFT[]
+  presale            Presale?
+  publicSale         PublicSale?
+  featuredBidEntries FeaturedBid[]     @relation("FeaturedBidCollection")
+  featuredAsWinner   FeaturedCycle[]   @relation("FeaturedWinnerCollection")
+
+  @@index([creatorId])
+  @@index([ownerAddress])
+  @@index([indexStatus])
+}
+
+model NFT {
+  id               String               @id @default(cuid())
+  tokenId          String
+  name             String?
+  imageUrl         String?
+  description      String?
+  traits           Json?
+  attributes       Json?
+  tokenUri         String?
+  contract         String               @db.Citext
+  standard         String?
+  rawMetadata      Json?
+  royaltyBps       Int?
+  royaltyRecipient String?              @db.Citext
+  ownerId          String?
+  collectionId     String?
+  single721Id      String?
+  single1155Id     String?
+  status           NftStatus            @default(PENDING)
+  retryCount       Int                  @default(0)
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  rarityScore      Decimal?             @db.Decimal(38, 18)
+  auctionEntries   Auction[]
+  listingEntries   MarketplaceListing[]
+  collection       Collection?          @relation(fields: [collectionId], references: [id])
+  owner            User?                @relation("ownedNFTs", fields: [ownerId], references: [id])
+  single1155       Single1155?          @relation(fields: [single1155Id], references: [id])
+  single721        Single721?           @relation(fields: [single721Id], references: [id])
+  activities       NFTActivity[]
+  sales            MarketplaceSale[]
+
+  @@unique([contract, tokenId])
+  @@unique([tokenId, contract, collectionId])
+  @@index([contract])
+  @@index([ownerId])
+}
+
+model TraitStat {
+  id         String   @id @default(cuid())
+  contract   String   @db.Citext
+  trait_type String
+  value      Json
+  count      Int
+  frequency  Float
+  createdAt  DateTime @default(now())
+
+  @@unique([contract, trait_type, value])
+  @@index([contract])
+}
+
+model NFTActivity {
+  id          String   @id @default(cuid())
+  nftId       String
+  contract    String   @db.Citext
+  tokenId     String
+  type        String
+  fromAddress String   @db.Citext
+  toAddress   String   @db.Citext
+  priceEtnWei Decimal? @db.Decimal(65, 0)
+  txHash      String
+  logIndex    Int      @default(0)
+  blockNumber Int
+  timestamp   DateTime
+  marketplace String?
+  rawData     Json?
+  createdAt   DateTime @default(now())
+  nft         NFT      @relation(fields: [nftId], references: [id])
+
+  @@unique([txHash, logIndex])
+  @@index([contract])
+  @@index([tokenId])
+  @@index([timestamp])
+  @@index([contract, tokenId, blockNumber])
+}
+
+model Single721 {
+  id               String            @id @default(cuid())
+  name             String
+  symbol           String
+  contract         String            @unique @db.Citext
+  tokenUri         String
+  royaltyRecipient String            @db.Citext
+  royaltyBps       Int
+  creatorId        String
+  ownerAddress     String            @db.Citext
+  description      String?
+  imageUrl         String?
+  indexStatus      IndexStatus       @default(PENDING)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  assetUploads     AssetUpload[]
+  deployment       DeployedContract?
+  nfts             NFT[]
+
+  @@index([indexStatus])
+}
+
+model Single1155 {
+  id               String            @id @default(cuid())
+  name             String
+  symbol           String
+  contract         String            @unique @db.Citext
+  baseUri          String
+  maxSupply        Int
+  mintPriceEtnWei  Decimal           @db.Decimal(65, 0)
+  maxPerWallet     Int
+  royaltyRecipient String            @db.Citext
+  royaltyBps       Int
+  creatorId        String
+  ownerAddress     String            @db.Citext
+  description      String?
+  imageUrl         String?
+  indexStatus      IndexStatus       @default(PENDING)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  assetUploads     AssetUpload[]
+  deployment       DeployedContract?
+  balances         Erc1155Balance[]
+  nfts             NFT[]
+
+  @@index([indexStatus])
+}
+
+model Erc1155Balance {
+  id           String     @id @default(cuid())
+  single1155Id String
+  ownerAddress String     @db.Citext
+  balance      Int        @default(0)
+  updatedAt    DateTime   @default(now())
+  single1155   Single1155 @relation(fields: [single1155Id], references: [id])
+
+  @@unique([single1155Id, ownerAddress])
+  @@index([ownerAddress])
+  @@index([single1155Id])
+}
+
+model Erc1155Holding {
+  id           String   @id @default(cuid())
+  contract     String   @db.Citext
+  tokenId      String
+  ownerAddress String   @db.Citext
+  balance      Int      @default(0)
+  updatedAt    DateTime @default(now())
+
+  @@unique([contract, tokenId, ownerAddress])
+  @@index([ownerAddress])
+  @@index([contract, tokenId])
+  @@index([contract, ownerAddress])
+}
+
+model MarketplaceListing {
+  id               String        @id @default(cuid())
+  nftId            String
+  sellerAddress    String        @db.Citext
+  quantity         Int           @default(1)
+  priceEtnWei      Decimal       @db.Decimal(65, 0)
+  currencyId       String?
+  priceTokenAmount Decimal?      @db.Decimal(65, 0)
+  status           ListingStatus @default(ACTIVE)
+  startTime        DateTime      @default(now())
+  endTime          DateTime?
+  txHashCreated    String?
+  txHashFilled     String?
+  txHashCancelled  String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  nft              NFT           @relation(fields: [nftId], references: [id])
+  currency         Currency?     @relation(fields: [currencyId], references: [id])
+
+  @@index([sellerAddress])
+  @@index([status])
+  @@index([startTime])
+  @@index([nftId])
+  @@index([currencyId])
+  @@index([nftId, status], map: "idx_listing_nft_status")
+  @@index([sellerAddress, status], map: "idx_listing_seller_status")
+}
+
+model Auction {
+  id                      String        @id @default(cuid())
+  nftId                   String
+  sellerAddress           String        @db.Citext
+  quantity                Int           @default(1)
+  startPriceEtnWei        Decimal       @db.Decimal(65, 0)
+  highestBidEtnWei        Decimal?      @db.Decimal(65, 0)
+  minIncrementEtnWei      Decimal?      @db.Decimal(65, 0)
+  currencyId              String?
+  startPriceTokenAmount   Decimal?      @db.Decimal(65, 0)
+  highestBidTokenAmount   Decimal?      @db.Decimal(65, 0)
+  minIncrementTokenAmount Decimal?      @db.Decimal(65, 0)
+  startTime               DateTime      @default(now())
+  endTime                 DateTime
+  status                  AuctionStatus @default(ACTIVE)
+  txHashCreated           String?
+  txHashFinalized         String?
+  txHashCancelled         String?
+  createdAt               DateTime      @default(now())
+  updatedAt               DateTime      @updatedAt
+  nft                     NFT           @relation(fields: [nftId], references: [id])
+  currency                Currency?     @relation(fields: [currencyId], references: [id])
+  highestBidder           String?       @db.Citext
+  bids                    AuctionBid[]
+
+  @@index([sellerAddress])
+  @@index([status])
+  @@index([endTime])
+  @@index([nftId])
+  @@index([currencyId])
+  @@index([nftId, status], map: "idx_auction_nft_status")
+  @@index([sellerAddress, status], map: "idx_auction_seller_status")
+}
+
+model AuctionBid {
+  id            String    @id @default(cuid())
+  auctionId     String
+  bidderAddress String    @db.Citext
+  amountWei     Decimal   @db.Decimal(65, 0)
+  currencyId    String?
+  txHash        String
+  logIndex      Int       @default(0)
+  blockNumber   Int
+  timestamp     DateTime
+  createdAt     DateTime  @default(now())
+  auction       Auction   @relation(fields: [auctionId], references: [id], onDelete: Cascade)
+  currency      Currency? @relation(fields: [currencyId], references: [id])
+
+  @@unique([txHash, logIndex])
+  @@index([auctionId, timestamp])
+  @@index([bidderAddress])
+  @@index([blockNumber])
+}
+
+model DeployedContract {
+  id                 String         @id @default(cuid())
+  contractType       ContractType
+  cloneAddress       String         @unique @db.Citext
+  implementationAddr String         @db.Citext
+  factoryAddress     String         @db.Citext
+  deployerAddress    String         @db.Citext
+  txHash             String         @unique
+  blockNumber        Int
+  metadataOption     MetadataOption
+  feeRecipient       String         @db.Citext
+  feeAmountEtnWei    Decimal        @db.Decimal(65, 0)
+  royaltyRecipient   String
+  royaltyBps         Int
+  baseURI            String?
+  maxSupply          Int?
+  rawInit            Json?
+  createdAt          DateTime       @default(now())
+  collectionId       String?        @unique
+  single721Id        String?        @unique
+  single1155Id       String?        @unique
+  collection         Collection?    @relation(fields: [collectionId], references: [id])
+  single1155         Single1155?    @relation(fields: [single1155Id], references: [id])
+  single721          Single721?     @relation(fields: [single721Id], references: [id])
+
+  @@index([factoryAddress])
+  @@index([deployerAddress])
+}
+
+model FeeConfig {
+  id              String         @id @default(cuid())
+  contractType    ContractType
+  metadataOption  MetadataOption
+  feeRecipient    String         @db.Citext
+  feeAmountEtnWei Decimal        @db.Decimal(65, 0)
+  active          Boolean        @default(true)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  updatedByUserId String?
+  logs            FeeConfigLog[]
+  targetUsdCents  Int?
+  pricingSource   String         @default("CRYPTOCOMPARE")
+  pricingPair     String         @default("ETNUSD")
+  lastPriceUsd    Decimal?       @db.Decimal(20, 10)
+  lastPriceAt     DateTime?
+
+  @@unique([contractType, metadataOption])
+  @@index([active])
+}
+
+model FeeConfigLog {
+  id                   String    @id @default(cuid())
+  feeConfigId          String
+  previousRecipient    String?   @db.Citext
+  newRecipient         String?   @db.Citext
+  previousAmountEtnWei Decimal?  @db.Decimal(65, 0)
+  newAmountEtnWei      Decimal?  @db.Decimal(65, 0)
+  changedByUserId      String?
+  reason               String?
+  createdAt            DateTime  @default(now())
+  feeConfig            FeeConfig @relation(fields: [feeConfigId], references: [id])
+
+  @@index([feeConfigId])
+  @@index([createdAt])
+}
+
+model PublicSale {
+  id           String     @id @default(cuid())
+  collectionId String     @unique
+  startTime    DateTime
+  priceEtnWei  Decimal    @db.Decimal(65, 0)
+  maxPerWallet Int
+  maxPerTx     Int
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @default(now())
+  collection   Collection @relation(fields: [collectionId], references: [id])
+}
+
+model Presale {
+  id              String                    @id @default(cuid())
+  collectionId    String                    @unique
+  startTime       DateTime
+  endTime         DateTime
+  priceEtnWei     Decimal                   @db.Decimal(65, 0)
+  maxSupply       Int
+  merkleRoot      String
+  whitelistCount  Int?
+  allowlistCommit String?
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  collection      Collection                @relation(fields: [collectionId], references: [id])
+  whitelist       PresaleWhitelistAddress[]
+}
+
+model PresaleWhitelistAddress {
+  id            String  @id @default(cuid())
+  presaleId     String
+  address       String  @db.Citext
+  maxAllocation Int?
+  presale       Presale @relation(fields: [presaleId], references: [id])
+
+  @@unique([presaleId, address])
+  @@index([address])
+  @@index([presaleId])
+}
+
+model PresaleDraft {
+  id                  String      @id @default(cuid())
+  creatorUserId       String
+  addresses           Json
+  count               Int
+  merkleRoot          String
+  sha256Commit        String      @unique
+  status              DraftStatus @default(DRAFT)
+  consumedAt          DateTime?
+  consumedByPresaleId String?
+  createdAt           DateTime    @default(now())
+  expiresAt           DateTime?
+
+  @@index([creatorUserId])
+  @@index([status, createdAt])
+}
+
+model AssetUpload {
+  id             String      @id @default(cuid())
+  uploaderUserId String?
+  collectionId   String?
+  single721Id    String?
+  single1155Id   String?
+  provider       String      @default("PINATA")
+  cid            String
+  url            String?
+  bytes          Int?
+  sha256         String?
+  contentType    String?
+  originalName   String?
+  createdAt      DateTime    @default(now())
+  collection     Collection? @relation(fields: [collectionId], references: [id])
+  single1155     Single1155? @relation(fields: [single1155Id], references: [id])
+  single721      Single721?  @relation(fields: [single721Id], references: [id])
+
+  @@index([cid])
+  @@index([collectionId])
+  @@index([single721Id])
+  @@index([single1155Id])
+}
+
+model CollectionSubmission {
+  id                String           @id @default(cuid())
+  submittedByUserId String
+  contract          String           @unique @db.Citext
+  ownerAddress      String?          @db.Citext
+  name              String?
+  symbol            String?
+  logoUrl           String?
+  coverUrl          String?
+  baseUri           String?
+  supply            Int?
+  description       String?
+  website           String?
+  x                 String?
+  instagram         String?
+  telegram          String?
+  feeTxHash         String?          @unique
+  feePaidWei        Decimal?         @db.Decimal(65, 0)
+  feeVerifiedAt     DateTime?
+  ownershipVerified Boolean          @default(false)
+  status            SubmissionStatus @default(PENDING)
+  statusReason      String?
+  reviewedByUserId  String?
+  reviewedAt        DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  submittedBy       User             @relation(fields: [submittedByUserId], references: [id])
+
+  @@index([status, createdAt])
+}
+
+model NFTRarity {
+  contract  String   @db.Citext
+  tokenId   String
+  score     Decimal  @db.Decimal(38, 18)
+  rank      Int
+  updatedAt DateTime @default(now())
+
+  @@id([contract, tokenId])
+  @@index([contract, rank])
+}
+
+model HolderReward {
+  user_id            String   @id
+  wallet_address     String?  @unique @db.Citext
+  last_acc_per_token Decimal  @default(0) @db.Decimal(78, 27)
+  claimed_etn        Decimal  @default(0) @db.Decimal(78, 18)
+  updated_at         DateTime @default(now()) @db.Timestamptz(6)
+}
+
+model RewardAccumulator {
+  id            String   @id
+  acc_per_token Decimal  @default(0) @db.Decimal(78, 27)
+  updated_at    DateTime @default(now()) @db.Timestamptz(6)
+}
+
+model FeaturedCycle {
+  id                       String              @id @default(cuid())
+  cycleId                  String              @unique
+  startAt                  DateTime
+  endAt                    DateTime
+  status                   FeaturedCycleStatus @default(ACTIVE)
+  minBidWei                Decimal             @db.Decimal(65, 0)
+  winnerBidId              String?             @unique
+  winnerBid                FeaturedBid?        @relation("WinnerBid", fields: [winnerBidId], references: [id])
+  winnerCollectionContract String?             @db.Citext
+  winnerCollection         Collection?         @relation("FeaturedWinnerCollection", fields: [winnerCollectionContract], references: [contract])
+  winnerAmountWei          Decimal?            @db.Decimal(65, 0)
+  finalizedAt              DateTime?
+  createdAt                DateTime            @default(now())
+  updatedAt                DateTime            @updatedAt
+  bids                     FeaturedBid[]       @relation("CycleBids")
+
+  @@index([startAt])
+  @@index([endAt])
+  @@index([status])
+}
+
+model FeaturedBid {
+  id                 String         @id @default(cuid())
+  cycleId            String
+  cycle              FeaturedCycle  @relation("CycleBids", fields: [cycleId], references: [id], onDelete: Cascade)
+  bidderAddress      String         @db.Citext
+  bidderUserId       String?
+  bidder             User?          @relation(fields: [bidderUserId], references: [id])
+  collectionContract String         @db.Citext
+  collection         Collection     @relation("FeaturedBidCollection", fields: [collectionContract], references: [contract])
+  totalBidWei        Decimal        @db.Decimal(65, 0)
+  txCount            Int            @default(0)
+  lastTxHash         String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  winnerOf           FeaturedCycle? @relation("WinnerBid")
+
+  @@unique([cycleId, bidderAddress])
+  @@index([collectionContract])
+  @@index([totalBidWei])
+  @@index([cycleId, totalBidWei])
+}
+
+model Currency {
+  id                 String                   @id @default(cuid())
+  symbol             String
+  decimals           Int                      @default(18)
+  kind               CurrencyKind             @default(NATIVE)
+  tokenAddress       String?                  @unique @db.Citext
+  active             Boolean                  @default(true)
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+  sales              MarketplaceSale[]
+  listings           MarketplaceListing[]
+  auctions           Auction[]
+  rewardAccumulators RewardAccumulatorMulti[]
+  holderRewards      HolderRewardMulti[]
+  distributionLogs   RewardDistributionLog[]
+  claimLogs          RewardClaimLog[]
+  bids               AuctionBid[]
+
+  @@unique([symbol, tokenAddress])
+}
+
+model MarketplaceSale {
+  id                      String    @id @default(cuid())
+  nftId                   String
+  buyerAddress            String    @db.Citext
+  sellerAddress           String    @db.Citext
+  quantity                Int       @default(1)
+  priceEtnWei             Decimal   @db.Decimal(65, 0)
+  royaltyPaidWei          Decimal?  @db.Decimal(65, 0)
+  marketplaceFeePaidWei   Decimal?  @db.Decimal(65, 0)
+  currencyId              String?
+  priceTokenAmount        Decimal?  @db.Decimal(65, 0)
+  royaltyPaidTokenAmount  Decimal?  @db.Decimal(65, 0)
+  feePaidTokenAmount      Decimal?  @db.Decimal(65, 0)
+  royaltyRecipient        String?   @db.Citext
+  marketplaceFeeRecipient String?   @db.Citext
+  txHash                  String
+  logIndex                Int       @default(0)
+  blockNumber             Int
+  timestamp               DateTime
+  createdAt               DateTime  @default(now())
+  nft                     NFT       @relation(fields: [nftId], references: [id])
+  currency                Currency? @relation(fields: [currencyId], references: [id])
+
+  @@unique([txHash, logIndex])
+  @@index([buyerAddress])
+  @@index([sellerAddress])
+  @@index([nftId])
+  @@index([timestamp])
+  @@index([currencyId, timestamp])
+}
+
+model RewardAccumulatorMulti {
+  id          String   @id @default(cuid())
+  currencyId  String
+  accPerToken Decimal  @default(0) @db.Decimal(78, 27)
+  updatedAt   DateTime @default(now()) @db.Timestamptz(6)
+  currency    Currency @relation(fields: [currencyId], references: [id])
+
+  @@unique([currencyId])
+}
+
+model HolderRewardMulti {
+  id              String   @id @default(cuid())
+  userId          String?
+  walletAddress   String   @db.Citext
+  currencyId      String
+  lastAccPerToken Decimal  @default(0) @db.Decimal(78, 27)
+  claimedAmount   Decimal  @default(0) @db.Decimal(78, 18)
+  updatedAt       DateTime @default(now()) @db.Timestamptz(6)
+  currency        Currency @relation(fields: [currencyId], references: [id])
+  user            User?    @relation(fields: [userId], references: [id])
+
+  @@unique([walletAddress, currencyId])
+  @@index([userId])
+}
+
+model RewardDistributionLog {
+  id          String   @id @default(cuid())
+  currencyId  String
+  amount      Decimal  @db.Decimal(78, 18)
+  txHash      String?
+  blockNumber Int?
+  timestamp   DateTime @default(now())
+  note        String?
+  currency    Currency @relation(fields: [currencyId], references: [id])
+
+  @@index([currencyId, timestamp])
+}
+
+model RewardClaimLog {
+  id            String   @id @default(cuid())
+  walletAddress String   @db.Citext
+  userId        String?
+  currencyId    String
+  amount        Decimal  @db.Decimal(78, 18)
+  txHash        String?
+  timestamp     DateTime @default(now())
+  currency      Currency @relation(fields: [currencyId], references: [id])
+  user          User?    @relation(fields: [userId], references: [id])
+
+  @@index([walletAddress, currencyId, timestamp])
+}
+
+model StolenItem {
+  id              String       @id @default(cuid())
+  contract        String       @db.Citext
+  tokenId         String
+  status          StolenStatus @default(FLAGGED)
+  source          StolenSource @default(USER)
+  reporterAddress String?      @db.Citext
+  reporterUserId  String?
+  evidenceUrl     String?
+  notes           String?
+  disputed        Boolean      @default(false)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  reporter        User?        @relation("StolenReporter", fields: [reporterUserId], references: [id])
+
+  @@unique([contract, tokenId])
+  @@index([status])
+  @@index([contract, tokenId, status])
+}
+
+model StolenEvent {
+  id           String   @id @default(cuid())
+  contract     String   @db.Citext
+  tokenId      String
+  action       String
+  actorAddress String?  @db.Citext
+  txHash       String?
+  logIndex     Int?     @default(0)
+  blockNumber  Int?
+  timestamp    DateTime @default(now())
+  notes        String?
+  createdAt    DateTime @default(now())
+
+  @@index([contract, tokenId, timestamp])
+  @@index([txHash, logIndex])
+}
+
+model MultisigSafe {
+  id        String          @id @default(cuid())
+  contract  String          @unique @db.Citext
+  name      String?
+  threshold Int
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+  owners    MultisigOwner[]
+  txs       MultisigTx[]
+
+  @@index([threshold])
+}
+
+model MultisigOwner {
+  id           String       @id @default(cuid())
+  safeId       String
+  ownerAddress String       @db.Citext
+  addedAt      DateTime     @default(now())
+  removedAt    DateTime?
+  safe         MultisigSafe @relation(fields: [safeId], references: [id])
+
+  @@unique([safeId, ownerAddress])
+  @@index([ownerAddress])
+}
+
+model MultisigTx {
+  id             String             @id @default(cuid())
+  safeId         String
+  nonce          Int
+  to             String             @db.Citext
+  valueWei       Decimal            @default(0) @db.Decimal(65, 0)
+  dataHex        String?
+  operation      Int?
+  submittedBy    String?            @db.Citext
+  status         MultisigTxStatus   @default(SUBMITTED)
+  executedTxHash String?
+  createdAt      DateTime           @default(now())
+  executedAt     DateTime?
+  safe           MultisigSafe       @relation(fields: [safeId], references: [id])
+  approvals      MultisigApproval[]
+
+  @@unique([safeId, nonce])
+  @@index([status])
+  @@index([to])
+}
+
+model MultisigApproval {
+  id           String     @id @default(cuid())
+  txId         String
+  ownerAddress String     @db.Citext
+  signature    String?
+  createdAt    DateTime   @default(now())
+  tx           MultisigTx @relation(fields: [txId], references: [id])
+
+  @@unique([txId, ownerAddress])
+  @@index([ownerAddress])
+}
+
+/* ===========================
+   NEW: Pending actions (for NFT item auctions)
+   =========================== */
+
+model PendingChainAction {
+  id        String                   @id @default(cuid())
+  type      PendingChainActionType
+  txHash    String                   @unique
+  from      String                   @db.Citext
+  chainId   Int
+  payload   Json                     // e.g., { auctionId, bidAmountBaseUnits, currencyId } etc.
+  relatedId String?                  // optional link to Auction/AuctionBid/NFT/etc.
+  status    PendingStatus            @default(PENDING)
+
+  createdAt DateTime                 @default(now())
+  updatedAt DateTime                 @updatedAt
+
+  @@index([status, createdAt])
+  @@index([type, createdAt])
+}
+
+/* ========== Enums ========== */
+
+enum ContractType {
+  ERC721_DROP
+  ERC721_SINGLE
+  ERC1155_SINGLE
+}
+
+enum MetadataOption {
+  UPLOAD
+  EXTERNAL
+}
+
+enum ListingStatus {
+  ACTIVE
+  SOLD
+  CANCELLED
+  EXPIRED
+}
+
+enum AuctionStatus {
+  ACTIVE
+  ENDED
+  CANCELLED
+}
+
+enum DraftStatus {
+  DRAFT
+  FINALIZED
+  CONSUMED
+}
+
+enum IndexStatus {
+  PENDING
+  QUEUED
+  INDEXING
+  COMPLETED
+  ERROR
+}
+
+enum NftStatus {
+  PENDING
+  SUCCESS
+  ERROR
+}
+
+enum SubmissionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum GatewayPref {
+  PUBLIC
+  PINATA
+}
+
+enum FeaturedCycleStatus {
+  UPCOMING
+  ACTIVE
+  FINALIZED
+}
+
+enum MultisigTxStatus {
+  SUBMITTED
+  APPROVED
+  EXECUTED
+  FAILED
+  CANCELLED
+  EXPIRED
+}
+
+enum StolenStatus {
+  FLAGGED
+  CLEARED
+}
+
+enum StolenSource {
+  USER
+  ADMIN
+  PARTNER
+  LAW_ENFORCEMENT
+  MARKETPLACE
+}
+
+enum CurrencyKind {
+  NATIVE
+  ERC20
+}
+
+/* NEW enums for pending actions */
+enum PendingChainActionType {
+  NFT_AUCTION_CREATE
+  NFT_AUCTION_BID
+  NFT_AUCTION_CANCEL
+  NFT_AUCTION_FINALIZE
+}
+
+enum PendingStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+  EXPIRED
+}
