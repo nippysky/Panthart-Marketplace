@@ -185,3 +185,24 @@ button{
     padding-right: 0;
   }
 }
+
+
+@layer utilities {
+  @keyframes loader-sweep {
+    0%   { transform: translateX(-120%); }
+    50%  { transform: translateX(30%); }
+    100% { transform: translateX(120%); }
+  }
+  .animate-loader-sweep {
+    animation: loader-sweep 1.3s ease-in-out infinite;
+  }
+}
+
+/* Respect reduced motion globally for our custom animations */
+@media (prefers-reduced-motion: reduce) {
+  .motion-safe\:animate-loader-sweep,
+  .motion-safe\:animate-bounce,
+  .motion-safe\:animate-spin {
+    animation: none !important;
+  }
+}

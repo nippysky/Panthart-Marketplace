@@ -2,8 +2,8 @@
 
 /**
  * NFTItemsTab (revamped • spacing tuned)
- * - No extra outer padding on toolbar/chips/grid (matches your usual page width)
- * - Filter sheet has proper internal padding, airy spacing, and responsive layout
+ * - Adds subtle mobile horizontal padding so cards don’t touch the screen edges.
+ * - Keeps your original spacing from `sm:` upward.
  */
 
 import * as React from "react";
@@ -74,8 +74,8 @@ type RawNFT = {
 
   isListed: boolean;
   listingPrice?: number;
-  listingPriceWei?: string;              // base units (ETN wei or token base units)
-  listingCurrencySymbol?: string | null; // currency symbol from API (e.g., "CT2")
+  listingPriceWei?: string;
+  listingCurrencySymbol?: string | null;
   isAuctioned: boolean;
 
   viewCount?: number;
@@ -140,7 +140,7 @@ export default function NFTItemsTab({
   rarityEnabled?: boolean;
   rarityPopulation?: number;
 }) {
-  const hydrated = useHydrated(); // 👈 important
+  const hydrated = useHydrated();
 
   // -------------------- Local state --------------------
   const [searchTerm, setSearchTerm] = React.useState("");
@@ -172,7 +172,7 @@ export default function NFTItemsTab({
 
   const queryClient = useQueryClient();
 
-  // -------------------- Facets (population + trait buckets) --------------------
+  // -------------------- Facets --------------------
   const { data: facets } = useQuery<FacetsResponse>({
     queryKey: ["facets", contract],
     queryFn: async () => {
@@ -305,7 +305,7 @@ export default function NFTItemsTab({
     getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
     initialPageParam: undefined,
     refetchInterval: activeSale ? 7000 : 15000,
-    refetchIntervalInBackground: true, // ✅ keep polling when tab is in background
+    refetchIntervalInBackground: true,
     refetchOnWindowFocus: true,
     staleTime: activeSale ? 3000 : 5000,
     placeholderData: keepPreviousData,
@@ -320,7 +320,6 @@ export default function NFTItemsTab({
               ? (n.standard as "ERC721" | "ERC1155")
               : undefined;
 
-          // shape to NFTItem, then add extra props (currency symbol + base units)
           const shaped: any = {
             id: String(n.id),
             nftAddress: n.contract,
@@ -347,7 +346,6 @@ export default function NFTItemsTab({
             updatedAt: n.updatedAt,
           };
 
-          // extras used by ArtDisplay (kept as loose fields)
           if (n.listingPriceWei) shaped.listingPriceWei = n.listingPriceWei;
           if (n.listingCurrencySymbol) shaped.currencySymbol = n.listingCurrencySymbol;
 
@@ -438,7 +436,8 @@ export default function NFTItemsTab({
     return (
       <section className="flex-1">
         <div className="sticky top-0 z-20 bg-background/70 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-b">
-          <div className="mx-auto w-full px-0 py-3 flex flex-wrap items-center gap-2">
+          {/* mobile padding added */}
+          <div className="mx-auto w-full px-3 sm:px-0 py-3 flex flex-wrap items-center gap-2">
             <div className="h-9 w-full sm:w-[360px] bg-muted/60 rounded-md" />
             <div className="h-9 w-[220px] bg-muted/50 rounded-md" />
             <div className="h-9 w-9 bg-muted/50 rounded-md" />
@@ -446,8 +445,9 @@ export default function NFTItemsTab({
           </div>
         </div>
 
-        <div className="mx-auto w-full px-0 mt-4 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5 md:gap-6">
-          {Array.from({ length: 8 }).map((_, i) => (
+        {/* mobile padding + slightly tighter gap on xs */}
+        <div className="mx-auto w-full px-3 sm:px-0 mt-4 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 md:gap-6">
+          {Array.from({ length: 10 }).map((_, i) => (
             <ArtDisplaySkeleton key={i} />
           ))}
         </div>
@@ -455,12 +455,13 @@ export default function NFTItemsTab({
     );
   }
 
-  // -------------------- UI (unchanged) --------------------
+  // -------------------- UI --------------------
   return (
     <section className="flex-1">
       {/* Toolbar */}
       <div className="sticky top-0 z-20 bg-background/70 backdrop-blur supports-[backdrop-filter]:bg-background/60 border-b">
-        <div className="mx-auto w-full px-0 py-3 flex flex-wrap items-center gap-2">
+        {/* mobile padding added */}
+        <div className="mx-auto w-full px-3 sm:px-0 py-3 flex flex-wrap items-center gap-2">
           {/* Search */}
           <div className="relative flex-1 min-w-[200px]">
             <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -526,16 +527,14 @@ export default function NFTItemsTab({
                 <Funnel className="h-4 w-4" />
                 Filters
                 {activeFilters > 0 && (
-                  <Badge variant="secondary" className="ml-1">{activeFilters}</Badge>
+                  <Badge variant="secondary" className="ml-1">
+                    {activeFilters}
+                  </Badge>
                 )}
               </Button>
             </SheetTrigger>
 
-            {/* Wider and padded, with beautiful internal layout */}
-            <SheetContent
-              side="right"
-              className="w-full sm:max-w-lg md:max-w-xl p-0"
-            >
+            <SheetContent side="right" className="w-full sm:max-w-lg md:max-w-xl p-0">
               <SheetHeader className="px-6 sm:px-8 pt-6">
                 <div className="flex items-center justify-between">
                   <SheetTitle className="flex items-center gap-2">
@@ -548,10 +547,9 @@ export default function NFTItemsTab({
                 </div>
               </SheetHeader>
 
-              {/* Content */}
               <div className="px-6 sm:px-8 pb-24 pt-4 overflow-y-auto h-full">
                 <div className="grid gap-8">
-                  {/* Search (dup for mobile ergonomics) */}
+                  {/* Search (dup for mobile) */}
                   <div className="rounded-2xl border p-4 sm:p-5">
                     <div className="text-sm font-semibold mb-3 flex items-center gap-2">
                       <Search className="h-4 w-4" /> Search
@@ -741,7 +739,6 @@ export default function NFTItemsTab({
                 </div>
               </div>
 
-              {/* Footer actions (sticky inside the sheet) */}
               <SheetFooter className="border-t bg-background px-6 sm:px-8 py-4 sticky bottom-0">
                 <div className="flex w-full items-center justify-between gap-3">
                   <Button variant="ghost" onClick={clearAll} className="text-muted-foreground">
@@ -754,9 +751,9 @@ export default function NFTItemsTab({
           </Sheet>
         </div>
 
-        {/* Active chips row (no extra side padding) */}
+        {/* Active chips row */}
         {activeFilters > 0 && (
-          <div className="mx-auto max-w-[1400px] px-0 pb-3 flex flex-wrap items-center gap-2">
+          <div className="mx-auto max-w-[1400px] px-3 sm:px-0 pb-3 flex flex-wrap items-center gap-2">
             {filterListed && (
               <Badge variant="secondary" className="gap-1">
                 Listed
@@ -803,10 +800,7 @@ export default function NFTItemsTab({
               values.map((v) => (
                 <Badge key={`${type}:${v}`} variant="secondary" className="gap-1">
                   {type}: {v}
-                  <X
-                    className="ml-1 h-3 w-3 cursor-pointer"
-                    onClick={() => toggleTrait(type, v)}
-                  />
+                  <X className="ml-1 h-3 w-3 cursor-pointer" onClick={() => toggleTrait(type, v)} />
                 </Badge>
               ))
             )}
@@ -818,10 +812,10 @@ export default function NFTItemsTab({
         )}
       </div>
 
-      {/* Grid (no extra side padding; a bit more gap for breathing) */}
-      <div className="mx-auto w-full px-0 mt-4 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5 md:gap-6">
+      {/* Grid — mobile padding + balanced gaps */}
+      <div className="mx-auto w-full px-3 sm:px-0 mt-4 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 md:gap-6">
         {(!data || data.pages.length === 0) &&
-          Array.from({ length: 8 }).map((_, i) => <ArtDisplaySkeleton key={i} />)}
+          Array.from({ length: 10 }).map((_, i) => <ArtDisplaySkeleton key={i} />)}
 
         {allNFTs.map((nft) => (
           <Link
@@ -843,9 +837,9 @@ export default function NFTItemsTab({
       {/* Infinite scroll sentinel */}
       <div ref={loaderRef} className="h-10" />
 
-      {/* Loading more */}
+      {/* Loading more — add mobile padding */}
       {isFetchingNextPage && (
-        <div className="mx-auto max-w-[1400px] px-0 text-center py-6">
+        <div className="mx-auto max-w-[1400px] px-3 sm:px-0 text-center py-6">
           <Loader className="inline-block h-6 w-6 animate-spin mr-2" />
           Loading more…
         </div>

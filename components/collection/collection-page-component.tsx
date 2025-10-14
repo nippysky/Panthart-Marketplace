@@ -1,13 +1,13 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 import { useActiveAccount } from "thirdweb/react";
 import { useQuery } from "@tanstack/react-query";
-import { Copy, Share2, Slash } from "lucide-react";
-import { BsPatchCheckFill, BsTwitterX } from "react-icons/bs";
+import { Copy, Slash } from "lucide-react";
+import { BsTwitterX } from "react-icons/bs";
 import { FiInstagram } from "react-icons/fi";
 import { FaGlobeAfrica, FaDiscord, FaTelegramPlane } from "react-icons/fa";
 import { toast } from "sonner";
@@ -35,11 +35,19 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import ShareButton from "../shared/share-button";
-
-// ✅ NEW: withdraw dialog
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import WithdrawProceedsDialog from "./withdraw-proceeds-dialog";
 
-// Minimal shape we rely on for the header
+/* ----------------------------------------------------------------------------
+ * Types
+ * --------------------------------------------------------------------------*/
+
 type CollectionHeader = {
   id: string;
   name: string;
@@ -63,7 +71,17 @@ type CollectionHeader = {
   auctionActiveCount?: number;
 };
 
+type CurrencyOption = {
+  id: string | null;
+  symbol: string;
+  kind: "NATIVE" | "ERC20";
+  decimals: number;
+  tokenAddress?: string | null;
+  active?: boolean;
+};
+
 export default function CollectionPageComponent({ collection }: { collection: CollectionHeader }) {
+  const router = useRouter();
   const pathname = usePathname();
   const segments = pathname.split("/").filter(Boolean);
 
@@ -72,32 +90,93 @@ export default function CollectionPageComponent({ collection }: { collection: Co
   const hideLoader = useLoaderStore((s) => s.hide);
   const { setIsIndexing } = useIndexingStore();
 
-  // Connected wallet
   const active = useActiveAccount();
   const accountAddress = active?.address?.toLowerCase() ?? null;
 
-  // Read-more
   const [fullDesc, setFullDesc] = useState(false);
-
-  // Debounced overlay handling
   const hideTimer = useRef<NodeJS.Timeout | null>(null);
 
-  // Header refresh using lightweight "header=1" endpoint
-  const { data: header, isLoading, isFetching } = useQuery({
-    queryKey: ["collection-header", collection.contract],
+  /* ============================================================================
+   * Currency list + selected currency
+   * ========================================================================== */
+
+  const ETN_OPTION: CurrencyOption = {
+    id: null,
+    symbol: "ETN",
+    kind: "NATIVE",
+    decimals: 18,
+  };
+
+  const { data: activeCurrencies } = useQuery({
+    queryKey: ["active-currencies"],
     queryFn: async () => {
-      const res = await fetch(`/api/collections/${encodeURIComponent(collection.contract)}?header=1`, {
-        cache: "no-store",
-      });
+      const res = await fetch("/api/currencies/active", { cache: "no-store" });
+      if (!res.ok) throw new Error("Failed to load active currencies");
+      const json = await res.json();
+      const fromApi: CurrencyOption[] = Array.isArray(json?.items)
+        ? json.items.map((it: any) => ({
+            id: String(it.id),
+            symbol: String(it.symbol),
+            kind: (it.kind as "NATIVE" | "ERC20") ?? "ERC20",
+            decimals: Number(it.decimals ?? 18),
+            tokenAddress: it.tokenAddress ?? null,
+            active: true,
+          }))
+        : [];
+      return fromApi;
+    },
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+  });
+
+  const currencyOptions: CurrencyOption[] = useMemo(() => {
+    const list = [ETN_OPTION];
+    if (activeCurrencies && activeCurrencies.length) {
+      const rest = activeCurrencies.filter(
+        (c) => !(c.kind === "NATIVE" && c.symbol.toUpperCase() === "ETN")
+      );
+      list.push(...rest);
+    }
+    return list;
+  }, [activeCurrencies]);
+
+  const [selectedCurrencyId, setSelectedCurrencyId] = useState<string | null>(null);
+
+  const selectedSymbol = useMemo(() => {
+    const hit = currencyOptions.find(
+      (c) =>
+        (selectedCurrencyId == null && c.id == null) ||
+        (selectedCurrencyId != null && c.id === selectedCurrencyId)
+    );
+    return hit?.symbol ?? "ETN";
+  }, [currencyOptions, selectedCurrencyId]);
+
+  /* ============================================================================
+   * Header (currency-aware) with shimmer on refetch
+   * ========================================================================== */
+  const {
+    data: headerRaw,
+    isLoading,
+    isFetching,
+    isRefetching,
+  } = useQuery({
+    queryKey: ["collection-header", collection.contract, selectedCurrencyId ?? "ETN"],
+    queryFn: async () => {
+      const q = selectedCurrencyId ? `&currencyId=${encodeURIComponent(selectedCurrencyId)}` : "";
+      const res = await fetch(
+        `/api/collections/${encodeURIComponent(collection.contract)}?header=1${q}`,
+        { cache: "no-store" }
+      );
       if (!res.ok) throw new Error("Failed to load collection header");
       return (await res.json()) as CollectionHeader;
     },
-    initialData: collection, // hydrate from SSR
+    placeholderData: (prev) => prev ?? collection,
     refetchOnWindowFocus: false,
     staleTime: 15_000,
   });
 
-  // Overlay: show on first load, tiny spinner for background refetch
+  const header: CollectionHeader = headerRaw ?? collection;
+
   useEffect(() => {
     if (isLoading) {
       if (hideTimer.current) clearTimeout(hideTimer.current);
@@ -108,11 +187,10 @@ export default function CollectionPageComponent({ collection }: { collection: Co
     return () => {
       if (hideTimer.current) clearTimeout(hideTimer.current);
     };
-  }, [isLoading, isFetching, showLoader, hideLoader]);
+  }, [isLoading, showLoader, hideLoader]);
 
-  // Indexing progress (non-blocking)
-  const indexedCount = header?.itemsCount ?? 0;
-  const supply = header?.supply ?? 0;
+  const indexedCount = header.itemsCount ?? 0;
+  const supply = header.supply ?? 0;
   const indexing = supply > 0 && indexedCount < supply;
 
   const [lastIndexed, setLastIndexed] = useState<number>(() =>
@@ -128,7 +206,6 @@ export default function CollectionPageComponent({ collection }: { collection: Co
     setIsIndexing(indexing);
   }, [indexedCount, lastIndexed, indexing, setIsIndexing]);
 
-  // Listed %
   const listedPercentage =
     supply > 0 && (header?.listingActiveCount ?? 0) > 0
       ? ((Number(header!.listingActiveCount) / supply) * 100).toFixed(1)
@@ -143,12 +220,7 @@ export default function CollectionPageComponent({ collection }: { collection: Co
   const TABS = [
     {
       label: "Items",
-      content: (
-        <NFTItemsTab
-          contract={header.contract}
-          collectionName={header.name}
-        />
-      ),
+      content: <NFTItemsTab contract={header.contract} collectionName={header.name} />,
     },
   ];
 
@@ -157,15 +229,62 @@ export default function CollectionPageComponent({ collection }: { collection: Co
     `Check out ${collection.name} on Panthart`;
 
   const canBuyFloor =
-    (header?.floorPrice ?? 0) > 0 && (header?.listingActiveCount ?? 0) > 0;
+    (header.floorPrice ?? 0) > 0 && (header.listingActiveCount ?? 0) > 0;
+
+  const [statShimmer, setStatShimmer] = useState(false);
+  const prevCurrencyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevCurrencyRef.current;
+    if (prev !== selectedCurrencyId) {
+      prevCurrencyRef.current = selectedCurrencyId;
+      setStatShimmer(true);
+    }
+  }, [selectedCurrencyId]);
+
+  useEffect(() => {
+    if (!isFetching && !isRefetching && statShimmer) {
+      const t = setTimeout(() => setStatShimmer(false), 200);
+      return () => clearTimeout(t);
+    }
+  }, [isFetching, isRefetching, statShimmer]);
+
+  const handleBuyFloor = async () => {
+    try {
+      const params = new URLSearchParams({
+        limit: "5",
+        listed: "true",
+        includeUnranked: "true",
+        sort: "lowToHigh",
+      });
+      if (selectedCurrencyId) params.set("currencyId", selectedCurrencyId);
+      const res = await fetch(
+        `/api/collections/${encodeURIComponent(header.contract)}?${params.toString()}`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) throw new Error("Could not fetch floor item");
+      const json = await res.json();
+      const nfts: any[] = Array.isArray(json?.nfts) ? json.nfts : [];
+
+      let pick =
+        nfts.find((n) => (n.listingCurrencySymbol || "ETN") === selectedSymbol) ??
+        nfts[0];
+
+      if (!pick?.tokenId) throw new Error("No listed item found");
+      router.push(`/collections/${header.contract}/${pick.tokenId}`);
+    } catch (e: any) {
+      toast.error(e?.message || "Unable to navigate to floor item");
+    }
+  };
 
   return (
     <section className="my-5 mb-20 flex-1">
-      {/* Breadcrumb */}
-      <Breadcrumb className="mb-5 mt-2">
-        <BreadcrumbList>
+      {/* Breadcrumb — ⤵ wrap fix */}
+      <Breadcrumb className="mb-5 mt-2 overflow-x-visible">
+        <BreadcrumbList className="flex flex-wrap gap-y-1">
           <BreadcrumbItem>
-            <BreadcrumbLink href="/">Home</BreadcrumbLink>
+            <BreadcrumbLink href="/" className="max-w-full whitespace-normal break-words">
+              Home
+            </BreadcrumbLink>
           </BreadcrumbItem>
           {segments.map((seg, i) => {
             const href = `/${segments.slice(0, i + 1).join("/")}`;
@@ -178,11 +297,18 @@ export default function CollectionPageComponent({ collection }: { collection: Co
                 <BreadcrumbSeparator>
                   <Slash className="w-3.5 h-3.5" />
                 </BreadcrumbSeparator>
-                <BreadcrumbItem>
+                <BreadcrumbItem className="max-w-full">
                   {isLast ? (
-                    <BreadcrumbPage>{label}</BreadcrumbPage>
+                    <BreadcrumbPage className="max-w-full whitespace-normal break-words">
+                      {label}
+                    </BreadcrumbPage>
                   ) : (
-                    <BreadcrumbLink href={href}>{label}</BreadcrumbLink>
+                    <BreadcrumbLink
+                      href={href}
+                      className="max-w-full whitespace-normal break-words"
+                    >
+                      {label}
+                    </BreadcrumbLink>
                   )}
                 </BreadcrumbItem>
               </React.Fragment>
@@ -210,8 +336,8 @@ export default function CollectionPageComponent({ collection }: { collection: Co
 
       {/* Header */}
       <section className="mt-5 flex flex-col gap-10 lg:flex-row lg:justify-between">
-        <div className="flex items-start gap-4">
-          <div className="relative w-[55px] h-[55px] lg:w-[85px] lg:h-[85px] rounded-md">
+        <div className="flex items-start gap-4 min-w-0">
+          <div className="relative w-[55px] h-[55px] lg:w-[85px] lg:h-[85px] rounded-md shrink-0">
             {header.logoUrl ? (
               <Image
                 src={header.logoUrl}
@@ -226,21 +352,20 @@ export default function CollectionPageComponent({ collection }: { collection: Co
               <Skeleton className="w-full h-full rounded-md" />
             )}
           </div>
-          <div>
+          <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <h2 className="tracking-widest uppercase font-bold text-[1rem] lg:text-[1.3rem]">
+              {/* ⤵ wrap fix: remove truncate, allow breaking */}
+              <h2 className="tracking-widest uppercase font-bold text-[1rem] lg:text-[1.3rem] break-words whitespace-normal leading-tight max-w-full">
                 {header.name}
               </h2>
 
-              {/* tiny non-blocking refresh spinner */}
               {isFetching && !isLoading && (
                 <span
                   aria-label="Refreshing…"
                   className="inline-block w-3.5 h-3.5 border-2 border-card-foreground/50 border-t-transparent rounded-full animate-spin"
                 />
               )}
-
-              <BsPatchCheckFill size={18} className="text-brandsec dark:text-brand" />
+              {/* verification badge removed */}
             </div>
             <div
               className="cursor-pointer flex items-center gap-2 mt-1"
@@ -256,7 +381,7 @@ export default function CollectionPageComponent({ collection }: { collection: Co
 
         <div className="flex flex-col gap-4 lg:items-end">
           <TooltipProvider>
-            <div className="flex flex-wrap items-center gap-10 justify-start lg:justify-end">
+            <div className="flex flex-wrap items-center gap-6 justify-start lg:justify-end">
               {header.website && (
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -323,18 +448,19 @@ export default function CollectionPageComponent({ collection }: { collection: Co
             </div>
           </TooltipProvider>
 
-          {/* Owner-only actions */}
+          {/* Owner-only actions — responsive */}
           {accountAddress && header.ownerAddress.toLowerCase() === accountAddress && (
-            <div className="flex items-center gap-3">
-              {/* ✅ NEW: Withdraw proceeds */}
-              <WithdrawProceedsDialog
-                contract={header.contract}
-                collectionName={header.name}
-                ownerAddress={header.ownerAddress}
-              />
-
-              {/* Existing edit sheet */}
-              <EditCollectionSheet collection={header as any} />
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3 w-full lg:w-auto">
+              <div className="min-w-0">
+                <WithdrawProceedsDialog
+                  contract={header.contract}
+                  collectionName={header.name}
+                  ownerAddress={header.ownerAddress}
+                />
+              </div>
+              <div className="min-w-0">
+                <EditCollectionSheet collection={header as any} />
+              </div>
             </div>
           )}
         </div>
@@ -359,10 +485,9 @@ export default function CollectionPageComponent({ collection }: { collection: Co
             )}
           </p>
 
-          <div className="flex flex-wrap items-center gap-10">
-            {/* Buy button only if there's a real floor & at least 1 active listing */}
-            {accountAddress && (header?.floorPrice ?? 0) > 0 && (header?.listingActiveCount ?? 0) > 0 && (
-              <Button>Buy Floor Price</Button>
+          <div className="flex flex-wrap items-center gap-6">
+            {accountAddress && (header.floorPrice ?? 0) > 0 && (header.listingActiveCount ?? 0) > 0 && (
+              <Button onClick={handleBuyFloor}>Buy Floor Price</Button>
             )}
 
             <div>
@@ -387,9 +512,41 @@ export default function CollectionPageComponent({ collection }: { collection: Co
                 </Button>
               </Link>
             </div>
-            <div>
+
+            <div className="min-w-[72px]">
               <small>Listed</small>
-              <p className="font-bold">{listedPercentage}%</p>
+              {statShimmer ? (
+                <Skeleton className="h-6 w-12 mt-1" />
+              ) : (
+                <p className="font-bold">{listedPercentage}%</p>
+              )}
+            </div>
+
+            {/* Currency Filter */}
+            <div className="min-w-[140px]">
+              <small className="block text-xs mb-1">Currency</small>
+              <Select
+                value={selectedCurrencyId ?? "ETN"}
+                onValueChange={(val) => {
+                  setSelectedCurrencyId(val === "ETN" ? null : val);
+                }}
+              >
+                <SelectTrigger className="w-[160px]">
+                  <SelectValue placeholder="ETN" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem key="ETN" value="ETN">
+                    ETN
+                  </SelectItem>
+                  {currencyOptions
+                    .filter((c) => !(c.kind === "NATIVE" && c.symbol.toUpperCase() === "ETN"))
+                    .map((c) => (
+                      <SelectItem key={c.id!} value={c.id!}>
+                        {c.symbol}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
         </div>
@@ -398,11 +555,23 @@ export default function CollectionPageComponent({ collection }: { collection: Co
           <div className="flex justify-start lg:justify-end gap-10">
             <div className="text-left lg:text-right">
               <small>Floor Price</small>
-              <h3 className="font-semibold">{formatNumber(header.floorPrice ?? 0)} ETN</h3>
+              {statShimmer ? (
+                <Skeleton className="h-6 w-28 mt-1" />
+              ) : (
+                <h3 className="font-semibold">
+                  {formatNumber(header.floorPrice ?? 0)} {selectedSymbol}
+                </h3>
+              )}
             </div>
             <div className="text-left lg:text-right">
               <small>Volume</small>
-              <h3 className="font-semibold">{formatNumber(header.volume ?? 0)} ETN</h3>
+              {statShimmer ? (
+                <Skeleton className="h-6 w-28 mt-1" />
+              ) : (
+                <h3 className="font-semibold">
+                  {formatNumber(header.volume ?? 0)} {selectedSymbol}
+                </h3>
+              )}
             </div>
           </div>
 

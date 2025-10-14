@@ -1,3 +1,4 @@
+// app/api/collections/[contract]/route.ts
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
@@ -25,6 +26,16 @@ function weiToEtn(wei: any): number {
   if (wei == null) return 0;
   const s = (wei as any).toString?.() ?? String(wei);
   return Number(s) / 1e18;
+}
+
+/** Convert any base-unit amount to a JS number using provided decimals. */
+function unitsToNumber(amount: any, decimals: number): number {
+  if (amount == null) return 0;
+  const s = (amount as any).toString?.() ?? String(amount);
+  const d = Math.max(0, Number(decimals) || 0);
+  if (d === 0) return Number(s);
+  // Avoid precision traps for huge values—display purposes only.
+  return Number(s) / 10 ** d;
 }
 
 /** Sanitize strings for PATCH body. */
@@ -93,10 +104,143 @@ async function getErc721OwnersOnChain(
   return owners.size;
 }
 
+/* =============================================================================
+   Currency-aware stats
+   - We compute floor & all-time volume for a selected currency.
+   - Default (no currencyId provided) = native ETN.
+   ========================================================================== */
+
 /**
- * Build a "header" blob for the collection: stable fields + fresh counters.
- * Also computes listing/auction live counts with proper time gates.
+ * Resolve the selected currency meta:
+ * - If `currencyId` is provided, load that ERC-20 (or NATIVE row if you choose to store one).
+ * - If omitted, return a synthetic "native" meta for ETN (decimals=18, kind='NATIVE').
  */
+async function resolveSelectedCurrency(currencyId?: string) {
+  if (!currencyId) {
+    // Default ETN (native); we don't require a DB row to exist.
+    return {
+      id: null as string | null,
+      symbol: "ETN",
+      kind: "NATIVE" as "NATIVE" | "ERC20",
+      decimals: 18,
+    };
+  }
+
+  const c = await prisma.currency.findFirst({
+    where: { id: currencyId, active: true },
+    select: { id: true, symbol: true, kind: true, decimals: true },
+  });
+
+  if (!c) {
+    // Fallback to native if an invalid/disabled id is passed.
+    return {
+      id: null as string | null,
+      symbol: "ETN",
+      kind: "NATIVE" as "NATIVE" | "ERC20",
+      decimals: 18,
+    };
+  }
+
+  return {
+    id: c.id,
+    symbol: c.symbol,
+    kind: c.kind as "NATIVE" | "ERC20",
+    decimals: c.decimals,
+  };
+}
+
+/**
+ * Compute currency-aware floor & all-time volume for a collection contract.
+ * - FLOOR: cheapest active listing in the chosen currency.
+ * - VOLUME: sum of historical sales in the chosen currency.
+ */
+async function computeCurrencyStatsForCollection(
+  contract: string,
+  currencyIdOrNull: string | null, // null => native ETN
+  currencyKind: "NATIVE" | "ERC20",
+  currencyDecimals: number
+) {
+  const now = new Date();
+
+  // ----------------------------
+  // FLOOR (cheapest active listing)
+  // ----------------------------
+let floorBaseUnits: any | null = null;
+
+if (currencyKind === "NATIVE") {
+  // Native ETN is encoded as (currencyId IS NULL OR currency.kind='NATIVE') + priceEtnWei
+  const cheapest = await prisma.marketplaceListing.findFirst({
+    where: {
+      status: ListingStatus.ACTIVE,
+      nft: { contract },
+      startTime: { lte: now },
+      AND: [
+        { OR: [{ endTime: null }, { endTime: { gt: now } }] },
+        { OR: [{ currencyId: null }, { currency: { kind: "NATIVE" as any } }] },
+      ],
+      // ❌ Do NOT add "priceEtnWei: { not: null }" here — field is non-nullable
+    },
+    orderBy: { priceEtnWei: "asc" },
+    select: { priceEtnWei: true },
+  });
+  floorBaseUnits = cheapest?.priceEtnWei ?? null;
+} else {
+// ERC-20: require a concrete currency and ensure token amount is present
+const cheapest = await prisma.marketplaceListing.findFirst({
+  where: {
+    status: ListingStatus.ACTIVE,
+    nft: { contract },
+    startTime: { lte: now },
+    AND: [
+      { OR: [{ endTime: null }, { endTime: { gt: now } }] },
+      { currencyId: currencyIdOrNull! }, // <-- use the function param here
+      { NOT: { priceTokenAmount: null } },
+    ],
+  },
+  orderBy: { priceTokenAmount: "asc" },
+  select: { priceTokenAmount: true },
+});
+
+  floorBaseUnits = cheapest?.priceTokenAmount ?? null;
+}
+
+
+  const floor =
+    currencyKind === "NATIVE"
+      ? weiToEtn(floorBaseUnits)
+      : unitsToNumber(floorBaseUnits, currencyDecimals);
+
+  // ----------------------------
+  // VOLUME (all-time)
+  // ----------------------------
+  if (currencyKind === "NATIVE") {
+    const agg = await prisma.marketplaceSale.aggregate({
+      where: {
+        nft: { contract },
+        OR: [{ currencyId: null }, { currency: { kind: "NATIVE" as any } }],
+      },
+      _sum: { priceEtnWei: true },
+    });
+    const volBase = agg._sum.priceEtnWei ?? 0;
+    const volume = weiToEtn(volBase);
+    return { floor, volume };
+  } else {
+    const agg = await prisma.marketplaceSale.aggregate({
+      where: {
+        nft: { contract },
+        currencyId: currencyIdOrNull!,
+      },
+      _sum: { priceTokenAmount: true },
+    });
+    const volBase = agg._sum.priceTokenAmount ?? 0;
+    const volume = unitsToNumber(volBase, currencyDecimals);
+    return { floor, volume };
+  }
+}
+
+/* =============================================================================
+   Header builder (base collection state, counts, etc.)
+   ========================================================================== */
 async function buildHeader(contractLookup: string) {
   const collection = await prisma.collection.findFirst({
     where: { contract: { equals: contractLookup, mode: "insensitive" } },
@@ -112,8 +256,8 @@ async function buildHeader(contractLookup: string) {
       x: true,
       discord: true,
       telegram: true,
-      floorPrice: true,
-      volume: true,
+      floorPrice: true, // stored ETN stats (legacy)
+      volume: true,     // stored ETN stats (legacy)
       supply: true,
       ownersCount: true,
       standard: true,
@@ -304,6 +448,7 @@ function buildTraitsWhereSql(
    - Two paths:
      • RAW SQL path: rarity + traits (and optional price sort)
      • "Light" Prisma path: simpler listing without rarity/traits
+   - NEW: optional currencyId to compute currency-aware floor/volume in header
    ========================================================================== */
 
 export async function GET(
@@ -316,6 +461,10 @@ export async function GET(
   const url = new URL(req.url);
   const headerOnly = url.searchParams.get("header") != null;
   const limit = Math.max(1, parseInt(url.searchParams.get("limit") || "20", 10));
+
+  // NEW: currency awareness (optional) — default is native ETN
+  const currencyId = url.searchParams.get("currencyId") || undefined;
+  const selectedCurrency = await resolveSelectedCurrency(currencyId);
 
   const search = url.searchParams.get("search")?.trim() || undefined;
   const listedFlag = url.searchParams.get("listed") === "true";
@@ -345,11 +494,29 @@ export async function GET(
     (!!priceSort && Object.keys(traitSelections).length > 0);
 
   try {
+    // Build header (base facts and counts)
     const header = await buildHeader(rawParam);
     if (!header) return NextResponse.json("Not found", { status: 404 });
     const contract = header.contract;
 
-    if (headerOnly) return NextResponse.json(header);
+    // Compute currency-aware stats and override header.floorPrice / header.volume
+    const { floor, volume } = await computeCurrencyStatsForCollection(
+      contract,
+      selectedCurrency.id,
+      selectedCurrency.kind,
+      selectedCurrency.decimals
+    );
+
+    const currencyAwareHeader = {
+      ...header,
+      floorPrice: floor,
+      volume: volume,
+    };
+
+    if (headerOnly) {
+      // We only return the header (now currency-aware).
+      return NextResponse.json(currencyAwareHeader);
+    }
 
     /* -----------------------------------------------------------------------
        RAW SQL PATH (rarity/traits, with optional price sort)
@@ -436,9 +603,6 @@ export async function GET(
        * Subselects that find the lowest active listing for:
        *  - Native ETN: currencyId IS NULL OR currency.kind = 'NATIVE'
        *  - ERC-20:      currency.kind = 'ERC20'
-       *
-       * NOTE: When comparing to the Postgres enum, we **cast** the string
-       *       to `"CurrencyKind"` to satisfy Postgres' enum semantics.
        */
       const lowestEtnExpr = `
         (
@@ -500,10 +664,7 @@ export async function GET(
         )
       `;
 
-      // Primary ORDER BY key: keep your original policy:
-      // - If price sort is requested, we only consider native ETN prices.
-      // - Else when using rarity order, order by rank asc/desc.
-      // - Else default to createdAt (newest last).
+      // Primary ORDER BY key (unchanged logic)
       let keyExprNumeric = "";
       if (priceSort === "lowToHigh") {
         keyExprNumeric = `COALESCE(${lowestEtnExpr}, ${bigNum}::numeric)`;
@@ -686,7 +847,7 @@ export async function GET(
           : null;
 
       return NextResponse.json({
-        ...header,
+        ...currencyAwareHeader,
         nfts,
         nextCursor,
       });
@@ -811,8 +972,7 @@ export async function GET(
         listingPrice = weiToEtn(cheapest.priceEtnWei as any);
         listingCurrencySymbol = "ETN";
         listingPriceWei =
-          (cheapest.priceEtnWei as any)?.toString?.() ??
-          String(cheapest.priceEtnWei);
+          (cheapest.priceEtnWei as any)?.toString?.() ?? String(cheapest.priceEtnWei);
       } else if (tokens.length > 0) {
         const cheapest = tokens.sort(
           (a, b) => Number(a.priceTokenAmount) - Number(b.priceTokenAmount)
@@ -866,7 +1026,7 @@ export async function GET(
     const nextCursor = raw.length === limit ? raw[raw.length - 1].id : null;
 
     return NextResponse.json({
-      ...header,
+      ...currencyAwareHeader,
       nfts,
       nextCursor,
     });
