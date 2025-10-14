@@ -13,6 +13,7 @@ const toTitle = (s: string) =>
   s ? s.slice(0, 1).toUpperCase() + s.slice(1).toLowerCase() : s;
 
 const ZERO_TX = (id: string) => `app-${id}`;
+const isRealHash = (h?: string) => /^0x[0-9a-fA-F]{64}$/.test(String(h || ""));
 
 function canonType(input: string): string {
   const t = input?.toUpperCase?.() || "";
@@ -61,7 +62,8 @@ function priceFromActivityRow(
   currenciesByAddr: Map<string, CurrencyMeta>
 ) {
   if (row.priceEtnWei != null) {
-    const wei = typeof row.priceEtnWei === "string" ? row.priceEtnWei : String(row.priceEtnWei);
+    const wei =
+      typeof row.priceEtnWei === "string" ? row.priceEtnWei : String(row.priceEtnWei);
     return { amount: decimalStrToFloat(wei, ETN_DECIMALS), symbol: "ETN" as const };
   }
   const raw = (row.rawData ?? {}) as any;
@@ -87,20 +89,27 @@ export async function GET(
 
   const { contract, tokenId } = await context.params;
   if (!contract || !tokenId) {
-    return NextResponse.json({ error: "Missing contract or tokenId" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Missing contract or tokenId" },
+      { status: 400 }
+    );
   }
 
   const url = new URL(req.url);
-  const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get("limit") ?? "20", 10)));
+  const limit = Math.max(
+    1,
+    Math.min(100, parseInt(url.searchParams.get("limit") ?? "20", 10))
+  );
 
   try {
     const nft = await prisma.nFT.findFirst({
       where: { contract: { equals: contract, mode: "insensitive" }, tokenId },
       select: { id: true },
     });
-    if (!nft) return NextResponse.json([], { headers: { "Cache-Control": "no-store" } });
+    if (!nft)
+      return NextResponse.json([], { headers: { "Cache-Control": "no-store" } });
 
-    // Load currencies (id + tokenAddress) so we can map both sale.currencyId and activity.rawData.currencyAddress
+    // Load currencies (id + tokenAddress)
     const allCurrencies = await prisma.currency.findMany({
       select: { id: true, tokenAddress: true, symbol: true, decimals: true, active: true },
     });
@@ -110,7 +119,8 @@ export async function GET(
 
     for (const c of allCurrencies) {
       const meta = { symbol: c.symbol, decimals: c.decimals ?? 18 };
-      if (c.tokenAddress) currenciesByAddr.set(String(c.tokenAddress).toLowerCase(), meta);
+      if (c.tokenAddress)
+        currenciesByAddr.set(String(c.tokenAddress).toLowerCase(), meta);
       currenciesById.set(c.id, meta);
     }
 
@@ -137,7 +147,7 @@ export async function GET(
       },
     });
 
-    // Confirmed sales (select fields only; DO NOT rely on relation typing)
+    // Confirmed sales
     const saleRows = await prisma.marketplaceSale.findMany({
       where: { nftId: nft.id },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
@@ -164,34 +174,42 @@ export async function GET(
       price: number | null;
       currencySymbol?: string | null;
       timestamp: string;
-      txHash: string;
+      txHash: string; // blank string means: do not render a link
       marketplace?: string | null;
     };
 
-    const mappedActs: UiRow[] = actRows.map((r) => {
-      const priceMeta = priceFromActivityRow(r, currenciesByAddr);
-      let uiType = r.type?.toUpperCase?.() || "";
-      let via: string | null = r.marketplace ?? null;
-      if (uiType === "AUCTION") {
-        uiType = "LISTING";
-        via = "Auction";
-      } else if (uiType === "CANCELLED_AUCTION") {
-        uiType = "UNLISTING";
-        via = "Auction";
-      }
-      return {
-        id: `act-${r.id}`,
-        type: toTitle(uiType),
-        fromAddress: r.fromAddress,
-        toAddress: r.toAddress,
-        price: priceMeta.amount,
-        currencySymbol: priceMeta.symbol,
-        timestamp: r.timestamp.toISOString(),
-        txHash: r.txHash,
-        marketplace: via,
-      };
-    });
+    // Map activities
+    const mappedActs: UiRow[] = actRows
+      .map((r) => {
+        const priceMeta = priceFromActivityRow(r, currenciesByAddr);
+        let uiType = r.type?.toUpperCase?.() || "";
+        let via: string | null = r.marketplace ?? null;
+        if (uiType === "AUCTION") {
+          uiType = "LISTING";
+          via = "Auction";
+        } else if (uiType === "CANCELLED_AUCTION") {
+          uiType = "UNLISTING";
+          via = "Auction";
+        }
 
+        const tx = isRealHash(r.txHash) ? r.txHash : "";
+
+        return {
+          id: `act-${r.id}`,
+          type: toTitle(uiType),
+          fromAddress: r.fromAddress,
+          toAddress: r.toAddress,
+          price: priceMeta.amount,
+          currencySymbol: priceMeta.symbol,
+          timestamp: r.timestamp.toISOString(),
+          txHash: tx, // sanitize synthetic hashes
+          marketplace: via,
+        };
+      })
+      // don't keep synthetic SALE rows; the confirmed sale below is the source of truth
+      .filter((r) => !(r.type === "Sale" && !isRealHash(r.txHash)));
+
+    // Map confirmed sales
     const mappedSales: UiRow[] = saleRows.map((s) => {
       let amount: number | null = null;
       let symbol: string | null = null;
@@ -216,16 +234,33 @@ export async function GET(
         price: amount,
         currencySymbol: symbol,
         timestamp: s.timestamp.toISOString(),
-        txHash: s.txHash,
+        txHash: isRealHash(s.txHash) ? s.txHash : "", // should always be real, but guard anyway
         marketplace: "Panthart",
       };
     });
 
-    const merged = [...mappedActs, ...mappedSales].sort(
-      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+    // Merge + de-dupe
+    const rawMerged = [...mappedActs, ...mappedSales];
+
+    const seen = new Set<string>();
+    const deduped: UiRow[] = [];
+    for (const row of rawMerged) {
+      // Prefer a real tx hash when present; otherwise fall back to a composite fingerprint.
+      const key = isRealHash(row.txHash)
+        ? `${row.type}|${row.txHash}`
+        : `${row.type}|${row.timestamp}|${row.fromAddress}|${row.toAddress}|${row.price ?? ""}`;
+
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(row);
+    }
+
+    deduped.sort(
+      (a, b) =>
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
     );
 
-    return NextResponse.json(merged.slice(0, limit), {
+    return NextResponse.json(deduped.slice(0, limit), {
       headers: { "Cache-Control": "no-store" },
     });
   } catch (err) {

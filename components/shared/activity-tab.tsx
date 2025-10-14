@@ -17,11 +17,12 @@ import { useQuery } from "@tanstack/react-query";
 export type NFTActivity = {
   id: string;
   type: string;
-  fromAddress: string;
-  toAddress: string;
+  fromAddress: string | null;
+  toAddress: string | null;
   price: number | null;
+  currencySymbol?: string | null;
   timestamp: string;
-  txHash: string;
+  txHash: string; // empty string means: no link
   marketplace?: string | null;
 };
 
@@ -59,8 +60,10 @@ const normalizeType = (raw: string) => {
   }
 };
 
-const short = (addr?: string) =>
+const short = (addr?: string | null) =>
   addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : "";
+
+const isRealHash = (h?: string) => /^0x[0-9a-fA-F]{64}$/.test(String(h || ""));
 
 export default function ActivityTab({ contract, tokenId }: ActivityTabProps) {
   const [activeFilter, setActiveFilter] = useState<string | null>(null);
@@ -68,10 +71,9 @@ export default function ActivityTab({ contract, tokenId }: ActivityTabProps) {
   const { data = [], isFetching, refetch } = useQuery<NFTActivity[], Error>({
     queryKey: ["activities", contract, tokenId],
     queryFn: async () => {
-      const res = await fetch(
-        `/api/nft/${contract}/${tokenId}/activities?limit=40`,
-        { cache: "no-store" }
-      );
+      const res = await fetch(`/api/nft/${contract}/${tokenId}/activities?limit=40`, {
+        cache: "no-store",
+      });
       if (!res.ok) throw new Error("Failed to fetch activities");
       const out = (await res.json()) as NFTActivity[];
       return out.map((a) => ({ ...a, type: normalizeType(a.type) }));
@@ -100,6 +102,9 @@ export default function ActivityTab({ contract, tokenId }: ActivityTabProps) {
             const when = formatDistanceToNow(new Date(act.timestamp), {
               addSuffix: true,
             });
+            const currency = act.currencySymbol || (act.price != null ? "ETN" : "");
+            const showLink = isRealHash(act.txHash);
+
             return (
               <div
                 key={act.id}
@@ -118,10 +123,9 @@ export default function ActivityTab({ contract, tokenId }: ActivityTabProps) {
                       {act.price != null && (
                         <span className="text-sm">
                           for{" "}
-                     <span className="font-semibold">
-  {act.price} {(act as any).currencySymbol ?? "ETN"}
-</span>
-
+                          <span className="font-semibold">
+                            {act.price} {currency}
+                          </span>
                         </span>
                       )}
                       {act.marketplace && (
@@ -131,13 +135,11 @@ export default function ActivityTab({ contract, tokenId }: ActivityTabProps) {
                       )}
                     </div>
 
-                    {/* addresses (responsive) */}
+                    {/* addresses */}
                     <div className="text-xs text-muted-foreground mt-0.5">
-                      {/* compact on mobile */}
                       <span className="sm:hidden font-mono">
                         {short(act.fromAddress)} → {short(act.toAddress)}
                       </span>
-                      {/* slightly expanded on ≥sm */}
                       <span className="hidden sm:inline font-mono">
                         {act.fromAddress
                           ? `${act.fromAddress.slice(0, 6)}…${act.fromAddress.slice(-4)}`
@@ -149,24 +151,26 @@ export default function ActivityTab({ contract, tokenId }: ActivityTabProps) {
                       </span>
                     </div>
 
-                    {/* time shown inside content on mobile */}
+                    {/* time (mobile) */}
                     <div className="sm:hidden text-[11px] opacity-70 mt-0.5">
                       {when}
                     </div>
                   </div>
 
-                  {/* right rail: time + link (always visible) */}
+                  {/* right rail */}
                   <div className="shrink-0 flex items-center justify-end gap-3 sm:gap-2">
                     <span className="hidden sm:block text-[11px] opacity-70 whitespace-nowrap">
                       {when}
                     </span>
-                    <Link
-                      href={`https://blockexplorer.electroneum.com/tx/${act.txHash}`}
-                      target="_blank"
-                      className="text-xs text-brandsec dark:text-brand hover:underline whitespace-nowrap"
-                    >
-                      View Tx
-                    </Link>
+                    {showLink && (
+                      <Link
+                        href={`https://blockexplorer.electroneum.com/tx/${act.txHash}`}
+                        target="_blank"
+                        className="text-xs text-brandsec dark:text-brand hover:underline whitespace-nowrap"
+                      >
+                        View Tx
+                      </Link>
+                    )}
                   </div>
                 </div>
               </div>

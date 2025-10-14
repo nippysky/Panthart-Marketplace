@@ -481,27 +481,39 @@ const crumbs = useMemo(() => {
 
   const isListedLive = Boolean(isListedLiveRaw && !endedAlready);
 
-  async function addActivity(
-    type: "LISTED" | "AUCTION_STARTED" | "CANCELLED_LISTING" | "CANCELLED_AUCTION" | "SALE",
-    from?: string | null,
-    to?: string | null,
-    priceWei?: string | null,
-    currencyAddr?: string | null
-  ) {
-    try {
-      await fetch(`/api/nft/${currentNFT.nftAddress}/${currentNFT.tokenId}/activities`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type,
-          fromAddress: from ?? account?.address ?? null,
-          toAddress: to ?? null,
-          priceWei: priceWei ?? null,
-          currencyAddress: currencyAddr ?? null,
-        }),
-      });
-    } catch {}
-  }
+async function addActivity(
+  type:
+    | "LISTED"
+    | "AUCTION_STARTED"
+    | "CANCELLED_LISTING"
+    | "CANCELLED_AUCTION"
+    | "SALE"
+    | "TRANSFER",
+  from?: string | null,
+  to?: string | null,
+  priceWei?: string | null,
+  currencyAddr?: string | null,
+  txHash?: string | null,
+  blockNumber?: number | null,
+  timestampISO?: string | null
+) {
+  try {
+    await fetch(`/api/nft/${currentNFT.nftAddress}/${currentNFT.tokenId}/activities`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type,
+        fromAddress: from ?? account?.address ?? null,
+        toAddress: to ?? null,
+        priceWei: priceWei ?? null,
+        currencyAddress: currencyAddr ?? null,
+        txHash: txHash ?? undefined,
+        blockNumber: blockNumber ?? undefined,
+        timestampISO: timestampISO ?? undefined,
+      }),
+    });
+  } catch {}
+}
 
   /* ---------- actions ---------- */
   const buyNow = async () => {
@@ -529,9 +541,8 @@ const crumbs = useMemo(() => {
         standard: currentNFT.standard as Standard,
       });
       hideLoader();
-      toast.success("Purchase complete");
-      setHasAnyOnChainListings(false);
-      void addActivity("SALE", account.address, owner.walletAddress);
+  toast.success("Purchase complete");
+setHasAnyOnChainListings(false);
 
       try {
         await fetch("/api/marketplace/listings/attach-tx", {
@@ -603,8 +614,8 @@ const crumbs = useMemo(() => {
 
       const ret = await marketplace.cancelAuction(auctionId);
       hideLoader();
-      toast.success("Auction cancelled");
-      void addActivity("CANCELLED_AUCTION");
+  toast.success("Auction cancelled");
+void addActivity("CANCELLED_AUCTION", account?.address ?? null, null, null, null, (ret as any)?.txHash);
 
       try {
         await fetch("/api/marketplace/auctions/attach-tx", {
@@ -638,9 +649,8 @@ const crumbs = useMemo(() => {
 
       const ret = await marketplace.cleanupExpired(listingSnap.id);
       hideLoader();
-      toast.success("Listing ended; NFT returned to seller");
-      setHasAnyOnChainListings(false);
-
+ toast.success("Listing ended; NFT returned to seller");
+void addActivity("CANCELLED_LISTING", account?.address ?? null, null, null, null, (ret as any)?.txHash);
       try {
         await fetch("/api/marketplace/listings/attach-tx", {
           method: "POST",
@@ -830,7 +840,7 @@ const crumbs = useMemo(() => {
       showLoader("Finalizing auction…");
       const txHash = await marketplace.finalizeAuction(auctionId);
       hideLoader();
-      toast.success("Auction finalized");
+     toast.success("Auction finalized");
 
       try {
         await fetch("/api/marketplace/auctions/attach-tx", {
