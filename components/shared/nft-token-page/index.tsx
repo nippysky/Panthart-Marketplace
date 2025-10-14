@@ -2,10 +2,7 @@
 
 /**
  * NFT Token Page (+ ERC1155 Withdraw for contract owner)
- * Responsive hardening for tiny screens:
- * - Title on its own row on mobile; actions row wraps underneath.
- * - No horizontal overflow anywhere (media/tabs/header protected).
- * - Compact buttons on mobile, all actions shrink-0.
+ * Transfer feature added: separate TransferDialog with ERC721/1155 support & validation.
  */
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -13,7 +10,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Copy, ExternalLink, Flag } from "lucide-react";
+import { Copy, ExternalLink, Flag, Send } from "lucide-react";
 import { ethers } from "ethers";
 
 import { Button } from "@/components/ui/button";
@@ -45,6 +42,7 @@ import { TabsContainer } from "./TabsContainer";
 import { useMarketplaceLive } from "@/lib/hooks/useMarketplaceLive";
 import { MARKETPLACE_CORE_ABI } from "@/lib/abis/marketplace-core/marketPlaceCoreABI";
 import WithdrawProceedsDialog1155 from "./WithdrawProceedsDialog1155";
+import TransferDialog from "./TransferDialog";
 
 const ERC1155_OWNER_ABI = ["function owner() view returns (address)"];
 
@@ -61,8 +59,6 @@ const ERC1155_ABI_BALANCEOF = [
 
 const keyOf = (addr?: string | null) =>
   (addr || "").startsWith("0x") ? (addr as string).toLowerCase() : (addr || "");
-const eqCI = (a?: string | null, b?: string | null) =>
-  keyOf(a) !== "" && keyOf(a) === keyOf(b);
 
 /** lightweight read provider for quick on-chain probes */
 function getReadProvider(): ethers.Provider | null {
@@ -162,6 +158,9 @@ export default function NFTTokenPageComponent({
   const [reportOpen, setReportOpen] = useState(false);
   const [isDropOwner, setIsDropOwner] = useState<boolean>(false);
 
+  // NEW: transfer modal state
+  const [transferOpen, setTransferOpen] = useState(false);
+
   useEffect(() => {
     showLoader("Loading NFT…");
     setMounted(true);
@@ -192,34 +191,34 @@ export default function NFTTokenPageComponent({
 
   const tokenUriHref = useMemo(() => ipfsToHttp(currentNFT.tokenUri), [currentNFT.tokenUri]);
 
-const crumbs = useMemo(() => {
-  const items: Array<
-    | { type: "link"; href: string; label: string; title?: string }
-    | { type: "page"; label: string; title?: string }
-  > = [
-    { type: "link", href: "/", label: "Home" },
-    { type: "link", href: "/collections", label: "Collections" },
-  ];
+  const crumbs = useMemo(() => {
+    const items: Array<
+      | { type: "link"; href: string; label: string; title?: string }
+      | { type: "page"; label: string; title?: string }
+    > = [
+      { type: "link", href: "/", label: "Home" },
+      { type: "link", href: "/collections", label: "Collections" },
+    ];
 
-  if (displayGroup.type === "collection") {
-    items.push({
-      type: "link",
-      href: `/collections/${currentNFT.nftAddress}`,
-      label: displayGroup.title,
-      title: displayGroup.title,
-    });
-    items.push({ type: "page", label: currentNFT.tokenId });
-  } else {
-    const shortAddr = shortenAddress(currentNFT.nftAddress);
-    items.push({
-      type: "page",
-      label: shortAddr,
-      title: currentNFT.nftAddress, // full address on hover
-    });
-    items.push({ type: "page", label: currentNFT.tokenId });
-  }
-  return items;
-}, [displayGroup, currentNFT]);
+    if (displayGroup.type === "collection") {
+      items.push({
+        type: "link",
+        href: `/collections/${currentNFT.nftAddress}`,
+        label: displayGroup.title,
+        title: displayGroup.title,
+      });
+      items.push({ type: "page", label: currentNFT.tokenId });
+    } else {
+      const shortAddr = shortenAddress(currentNFT.nftAddress);
+      items.push({
+        type: "page",
+        label: shortAddr,
+        title: currentNFT.nftAddress,
+      });
+      items.push({ type: "page", label: currentNFT.tokenId });
+    }
+    return items;
+  }, [displayGroup, currentNFT]);
 
   /* ---------- on-chain listing/auction snapshots ---------- */
   const [listingSnap, setListingSnap] = useState<{
@@ -358,7 +357,6 @@ const crumbs = useMemo(() => {
       ? toISOFromSeconds(listingSnap.row.end)
       : null;
 
-  const notStartedYet = listingStartISO ? Date.now() < new Date(listingStartISO).getTime() : false;
   const endedAlready  = listingEndISO ? Date.now() > new Date(listingEndISO).getTime() : false;
 
   const listingSeller = listingSnap?.row?.seller || null;
@@ -366,13 +364,6 @@ const crumbs = useMemo(() => {
     !!(listingSeller && account?.address) &&
     listingSeller.toLowerCase() === account.address.toLowerCase();
 
-  const isAuctionLive = !!auctionId;
-  const canManageAuction =
-    !!(auctionSeller && account?.address) &&
-    auctionSeller.toLowerCase() === account.address.toLowerCase();
-  const canCancelAuction = canManageAuction && Number(auctionBidsCount || 0) === 0;
-
-  /* ---------- per-seller 1155 checks ---------- */
   const [isListedForMe, setIsListedForMe] = useState<boolean>(false);
   const [onAuctionForMe, setOnAuctionForMe] = useState<boolean>(false);
 
@@ -420,7 +411,6 @@ const crumbs = useMemo(() => {
     };
   }, [account?.address, currentNFT.nftAddress, currentNFT.tokenId, currentNFT.standard]);
 
-  /* ---------- API flags via React Query ---------- */
   const {
     hasAnyListings,
     hasAnyAuctions,
@@ -433,7 +423,6 @@ const crumbs = useMemo(() => {
     account: account?.address,
   });
 
-  /* ---------- auction info (API snapshot, minimal) ---------- */
   const [auctionInfo, setAuctionInfo] = useState<{
     active: boolean;
     auction?: {
@@ -452,7 +441,6 @@ const crumbs = useMemo(() => {
     } | null;
   } | null>(null);
 
-  /* ---------- on-chain probe to drive the quick-link ---------- */
   const [hasAnyOnChainListings, setHasAnyOnChainListings] = useState<boolean>(false);
 
   useEffect(() => {
@@ -466,7 +454,6 @@ const crumbs = useMemo(() => {
     return () => { cancel = true; clearInterval(id); };
   }, [currentNFT.nftAddress, currentNFT.tokenId]);
 
-  /* ---------- composite UI booleans ---------- */
   const is1155 = (currentNFT.standard as Standard) === "ERC1155";
 
   const hasListingsUI =
@@ -474,6 +461,7 @@ const crumbs = useMemo(() => {
     Boolean(isListedLiveRaw) ||
     Boolean(is1155 && isListedForMe);
 
+  const isAuctionLive = !!auctionId;
   const hasAuctionsUI =
     Boolean(hasAnyAuctions) ||
     Boolean(isAuctionLive) ||
@@ -481,39 +469,54 @@ const crumbs = useMemo(() => {
 
   const isListedLive = Boolean(isListedLiveRaw && !endedAlready);
 
-async function addActivity(
-  type:
-    | "LISTED"
-    | "AUCTION_STARTED"
-    | "CANCELLED_LISTING"
-    | "CANCELLED_AUCTION"
-    | "SALE"
-    | "TRANSFER",
-  from?: string | null,
-  to?: string | null,
-  priceWei?: string | null,
-  currencyAddr?: string | null,
-  txHash?: string | null,
-  blockNumber?: number | null,
-  timestampISO?: string | null
-) {
-  try {
-    await fetch(`/api/nft/${currentNFT.nftAddress}/${currentNFT.tokenId}/activities`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        type,
-        fromAddress: from ?? account?.address ?? null,
-        toAddress: to ?? null,
-        priceWei: priceWei ?? null,
-        currencyAddress: currencyAddr ?? null,
-        txHash: txHash ?? undefined,
-        blockNumber: blockNumber ?? undefined,
-        timestampISO: timestampISO ?? undefined,
-      }),
-    });
-  } catch {}
-}
+  // ---------- activities logging helper ----------
+  async function addActivity(
+    type:
+      | "LISTED"
+      | "AUCTION_STARTED"
+      | "CANCELLED_LISTING"
+      | "CANCELLED_AUCTION"
+      | "SALE"
+      | "TRANSFER",
+    from?: string | null,
+    to?: string | null,
+    priceWei?: string | null,
+    currencyAddr?: string | null,
+    txHash?: string | null,
+    blockNumber?: number | null,
+    timestampISO?: string | null
+  ) {
+    try {
+      await fetch(`/api/nft/${currentNFT.nftAddress}/${currentNFT.tokenId}/activities`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type,
+          fromAddress: from ?? account?.address ?? null,
+          toAddress: to ?? null,
+          priceWei: priceWei ?? null,
+          currencyAddress: currencyAddr ?? null,
+          txHash: txHash ?? undefined,
+          blockNumber: blockNumber ?? undefined,
+          timestampISO: timestampISO ?? undefined,
+        }),
+      });
+    } catch {}
+  }
+
+  // ---------- optional: call apply-transfer API if present ----------
+  async function applyTransferToDB(txHash?: string | null) {
+    try {
+      if (!txHash) return;
+      await fetch(`/api/nft/${currentNFT.nftAddress}/${currentNFT.tokenId}/apply-transfer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ txHash }),
+      });
+    } catch {
+      // no-op if route not present; UI still refreshes
+    }
+  }
 
   /* ---------- actions ---------- */
   const buyNow = async () => {
@@ -541,8 +544,12 @@ async function addActivity(
         standard: currentNFT.standard as Standard,
       });
       hideLoader();
-  toast.success("Purchase complete");
-setHasAnyOnChainListings(false);
+      toast.success("Purchase complete");
+      setHasAnyOnChainListings(false);
+
+      // reflect ownership quickly (best-effort)
+      await applyTransferToDB((ret as any)?.txHash);
+      await addActivity("TRANSFER", null, null, null, null, (ret as any)?.txHash);
 
       try {
         await fetch("/api/marketplace/listings/attach-tx", {
@@ -608,14 +615,14 @@ setHasAnyOnChainListings(false);
   async function onCancelAuction() {
     if (!auctionId) return;
     try {
-      if (!canCancelAuction) return toast.error("You can only cancel before any bids.");
+      if (Number(auctionBidsCount || 0) > 0) return toast.error("You can only cancel before any bids.");
       showLoader("Cancelling auction…");
       setHasAnyAuctionsOptimistic(false);
 
       const ret = await marketplace.cancelAuction(auctionId);
       hideLoader();
-  toast.success("Auction cancelled");
-void addActivity("CANCELLED_AUCTION", account?.address ?? null, null, null, null, (ret as any)?.txHash);
+      toast.success("Auction cancelled");
+      void addActivity("CANCELLED_AUCTION", account?.address ?? null, null, null, null, (ret as any)?.txHash);
 
       try {
         await fetch("/api/marketplace/auctions/attach-tx", {
@@ -649,8 +656,8 @@ void addActivity("CANCELLED_AUCTION", account?.address ?? null, null, null, null
 
       const ret = await marketplace.cleanupExpired(listingSnap.id);
       hideLoader();
- toast.success("Listing ended; NFT returned to seller");
-void addActivity("CANCELLED_LISTING", account?.address ?? null, null, null, null, (ret as any)?.txHash);
+      toast.success("Listing ended; NFT returned to seller");
+      void addActivity("CANCELLED_LISTING", account?.address ?? null, null, null, null, (ret as any)?.txHash);
       try {
         await fetch("/api/marketplace/listings/attach-tx", {
           method: "POST",
@@ -840,7 +847,11 @@ void addActivity("CANCELLED_LISTING", account?.address ?? null, null, null, null
       showLoader("Finalizing auction…");
       const txHash = await marketplace.finalizeAuction(auctionId);
       hideLoader();
-     toast.success("Auction finalized");
+      toast.success("Auction finalized");
+
+      // reflect ownership quickly (best-effort)
+      await applyTransferToDB(txHash);
+      await addActivity("TRANSFER", null, null, null, null, txHash);
 
       try {
         await fetch("/api/marketplace/auctions/attach-tx", {
@@ -951,20 +962,25 @@ void addActivity("CANCELLED_LISTING", account?.address ?? null, null, null, null
     };
   }, [invalidateAll]);
 
+  // When a manual transfer completes from the modal
+  async function onManualTransferred(p: { to: string; quantity: number; txHash: string; blockNumber?: number | null; timestampISO?: string | null }) {
+    await addActivity("TRANSFER", account?.address ?? null, p.to, null, null, p.txHash, p.blockNumber ?? null, p.timestampISO ?? null);
+    await applyTransferToDB(p.txHash);
+    router.refresh();
+  }
+
   return (
     <section className="mt-8 mb-20 w-full max-w-full overflow-x-hidden">
       <LoaderModal />
 
-   {/* Breadcrumbs (mobile-safe horizontal scroll) */}
-<div className="w-full max-w-full overflow-x-auto whitespace-nowrap [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-  <BreadcrumbsBar items={crumbs} />
-</div>
-
+      {/* Breadcrumbs (mobile-safe horizontal scroll) */}
+      <div className="w-full max-w-full overflow-x-auto whitespace-nowrap [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <BreadcrumbsBar items={crumbs} />
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 sm:gap-8 w-full max-w-full">
         {/* Media */}
-     <div className="lg:col-span-5 w-full max-w-full min-w-0">
-          {/* protect from horizontal overflow on smallest screens */}
+        <div className="lg:col-span-5 w-full max-w-full min-w-0">
           <div className="w-full max-w-full overflow-hidden rounded-xl border border-border/50 bg-muted/5">
             <Media
               src={currentNFT.image as string}
@@ -977,9 +993,7 @@ void addActivity("CANCELLED_LISTING", account?.address ?? null, null, null, null
         {/* Right column */}
         <div className="lg:col-span-7 flex flex-col gap-6 w-full max-w-full min-w-0">
 
-          {/* Header & quick actions
-              - Column on mobile (title first, actions below)
-              - Row on md+ */}
+          {/* Header & quick actions */}
           <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3 sm:gap-4 w-full">
             {/* Title / meta */}
             <div className="min-w-0 flex-1 order-1">
@@ -1073,6 +1087,19 @@ void addActivity("CANCELLED_LISTING", account?.address ?? null, null, null, null
                 />
               )}
 
+              {/* NEW: Transfer button (visible if owner/holder connected) */}
+              {isOwnerOrHolderConnected && (
+                <Button
+                  variant="outline"
+                  className="h-9 px-3 sm:px-4 shrink-0"
+                  onClick={() => setTransferOpen(true)}
+                  title="Transfer to another wallet"
+                >
+                  <Send className="w-4 h-4 mr-2" />
+                  Transfer
+                </Button>
+              )}
+
               {account?.address && (
                 <Button
                   variant="outline"
@@ -1142,8 +1169,8 @@ void addActivity("CANCELLED_LISTING", account?.address ?? null, null, null, null
             onAuctionForMe={onAuctionForMe}
             onAuction={Boolean(isAuctionLive || (auctionInfo?.active ?? false))}
             canManage={canManageListing}
-            canManageAuction={canManageAuction}
-            canCancelAuction={canCancelAuction}
+            canManageAuction={!!(auctionSeller && account?.address) && auctionSeller.toLowerCase() === account.address.toLowerCase()}
+            canCancelAuction={!!(auctionSeller && account?.address) && auctionSeller.toLowerCase() === account.address.toLowerCase() && Number(auctionBidsCount || 0) === 0}
             hasAuctionId={Boolean(auctionId)}
             isOwnerConnected={Boolean(isOwnerOrHolderConnected)}
             disabledBuy={!isListedLive || (listingStartISO ? Date.now() < new Date(listingStartISO).getTime() : false)}
@@ -1154,11 +1181,7 @@ void addActivity("CANCELLED_LISTING", account?.address ?? null, null, null, null
             onEditListing={() => { setEditMode(true); setSellOpen(true); }}
             onCleanupExpired={onCleanupExpired}
             onCancelAuction={onCancelAuction}
-            showFinalizeAuction={
-              Boolean(auctionId) &&
-              Boolean(auctionEndSec && Math.floor(Date.now() / 1000) > auctionEndSec) &&
-              !auctionSettled
-            }
+            showFinalizeAuction={showFinalizeAuction}
             onFinalizeAuction={onFinalizeAuction}
           />
 
@@ -1252,6 +1275,17 @@ void addActivity("CANCELLED_LISTING", account?.address ?? null, null, null, null
             endTimeISO: p.endTimeISO,
           });
         }}
+      />
+
+      {/* NEW: Transfer modal */}
+      <TransferDialog
+        open={transferOpen}
+        onOpenChange={setTransferOpen}
+        standard={currentNFT.standard as any}
+        contract={currentNFT.nftAddress as `0x${string}`}
+        tokenId={currentNFT.tokenId}
+        your1155Balance={currentNFT.standard === "ERC1155" ? my1155Balance : undefined}
+        onTransferred={onManualTransferred}
       />
     </section>
   );
