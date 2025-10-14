@@ -7,9 +7,15 @@ import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 import { BsPatchCheckFill } from "react-icons/bs";
-import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectTrigger,
+  SelectContent,
+  SelectItem,
+  SelectValue,
+} from "@/components/ui/select";
 
-/* ── types ── */
+/* ── types (unchanged) ── */
 type CollectionHeader = {
   contract: string;
   name: string | null;
@@ -22,7 +28,6 @@ type CollectionHeader = {
   currencySymbol?: string;
   currencyId?: string;
 };
-
 type TopItem = {
   tokenId: string;
   name: string | null;
@@ -30,17 +35,11 @@ type TopItem = {
   rarityScore: number | null;
   volumeInCurrency?: number | null;
 };
-
-type ApiPayload = {
-  ok: boolean;
-  collection: CollectionHeader;
-  topItems: TopItem[];
-};
-
+type ApiPayload = { ok: boolean; collection: CollectionHeader; topItems: TopItem[] };
 type CurrencyMeta = { id: string; symbol: string; decimals: number; kind: "NATIVE" | "ERC20" | string };
 type MediaKind = "image" | "video" | "unknown";
 
-/* ── helpers ── */
+/* ── helpers (unchanged) ── */
 function ipfsToHttp(u?: string | null) {
   if (!u) return "";
   return u.startsWith("ipfs://") ? `https://ipfs.io/ipfs/${u.slice(7)}` : u;
@@ -70,7 +69,7 @@ function useVisibility<T extends HTMLElement>() {
   React.useEffect(() => {
     const node = ref.current;
     if (!node) return;
-    const obs = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting), { rootMargin: "200px" });
+    const obs = new IntersectionObserver(([e]) => setVisible(e.isIntersecting), { rootMargin: "200px" });
     obs.observe(node);
     return () => obs.disconnect();
   }, []);
@@ -82,7 +81,6 @@ function useScrollRef<T extends HTMLElement>() {
   return { ref, scrollBy };
 }
 
-/* Only two filters now */
 const FILTERS = [
   { key: "rarity", label: "Rarity" },
   { key: "volume", label: "Top Volume" },
@@ -95,7 +93,6 @@ export default function FeaturedCollection({ className }: { className?: string }
   const [loading, setLoading] = React.useState(true);
   const [payload, setPayload] = React.useState<ApiPayload | null>(null);
 
-  // currency state
   const [currencyId, setCurrencyId] = React.useState<string>("native");
   const [currencies, setCurrencies] = React.useState<CurrencyMeta[]>([
     { id: "native", symbol: "ETN", decimals: 18, kind: "NATIVE" },
@@ -104,23 +101,21 @@ export default function FeaturedCollection({ className }: { className?: string }
   const { ref } = useScrollRef<HTMLDivElement>();
   const [descOpen, setDescOpen] = React.useState(false);
 
-  // load active currencies
   React.useEffect(() => {
     (async () => {
       try {
         const res = await fetch("/api/currencies/active", { cache: "no-store" });
         const data = await res.json();
         const active = (data?.items ?? []).filter(
-          (c: any) => String(c.symbol).toUpperCase() !== "ETN" || String(c.kind).toUpperCase() !== "NATIVE"
+          (c: any) =>
+            String(c.symbol).toUpperCase() !== "ETN" ||
+            String(c.kind).toUpperCase() !== "NATIVE"
         );
         setCurrencies([{ id: "native", symbol: "ETN", decimals: 18, kind: "NATIVE" }, ...active]);
-      } catch {
-        /* keep ETN only on failure */
-      }
+      } catch {}
     })();
   }, []);
 
-  // fetch featured payload for filter + currency
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -145,7 +140,6 @@ export default function FeaturedCollection({ className }: { className?: string }
   const items = payload?.topItems ?? [];
   const symbol = col?.currencySymbol || "ETN";
 
-  // preload images (browser Image, not Next's)
   React.useEffect(() => {
     items.forEach((it) => {
       if (!it.imageUrl) return;
@@ -166,7 +160,7 @@ export default function FeaturedCollection({ className }: { className?: string }
       <div className="relative">
         <div
           className={cn(
-            "mx-auto px-4 md:px-8",
+            "mx-auto px-4 sm:px-6 md:px-8 py-6 md:py-8",
             "rounded-3xl border border-white/10 backdrop-blur-xl",
             "bg-white/5 dark:bg-white/5 ring-1 ring-black/5",
             "shadow-[0_10px_40px_-10px_rgba(0,0,0,0.35)]"
@@ -187,59 +181,68 @@ export default function FeaturedCollection({ className }: { className?: string }
             </div>
           ) : null}
 
-          <div className="py-6 md:py-8">
-            {/* header row */}
-            <div className="flex flex-col lg:flex-row lg:items-center gap-5">
-              <div className="flex items-center gap-4 min-w-0">
+          {/* header grid */}
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-[auto_1fr] lg:grid-cols-[auto_1fr_auto] items-start">
+            {/* avatar + title */}
+            <div className="flex items-start gap-4 min-w-0">
+              {loading ? (
+                <Skeleton className="h-12 w-12 sm:h-14 sm:w-14 rounded-2xl" />
+              ) : (
+                <div className="relative h-12 w-12 sm:h-14 sm:w-14 md:h-16 md:w-16 rounded-2xl overflow-hidden border border-white/15 bg-black/20 shrink-0">
+                  {col?.logoUrl ? (
+                    <Image
+                      src={ipfsToHttp(col.logoUrl)}
+                      alt={col?.name ?? "logo"}
+                      fill
+                      unoptimized
+                      className="object-cover"
+                    />
+                  ) : null}
+                </div>
+              )}
+
+              <div className="min-w-0">
                 {loading ? (
-                  <Skeleton className="h-14 w-14 rounded-2xl" />
+                  <Skeleton className="h-7 w-[220px] sm:w-[280px] md:w-[320px] rounded-md" />
                 ) : (
-                  <div className="relative h-14 w-14 rounded-2xl overflow-hidden border border-white/15 bg-black/20">
-                    {col?.logoUrl ? (
-                      <Image src={ipfsToHttp(col.logoUrl)} alt={col?.name ?? "logo"} fill unoptimized className="object-cover" />
-                    ) : null}
+                  <div className="text-xl sm:text-2xl md:text-3xl font-semibold leading-tight break-words flex items-center gap-2 min-w-0">
+                    <span className="truncate">{col?.name ?? "Collection"}</span>
+                    <BsPatchCheckFill className="text-brandsec dark:text-brand text-base sm:text-lg align-middle translate-y-[1px] shrink-0" />
                   </div>
                 )}
 
-                <div className="min-w-0">
+                {/* stats pills */}
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
                   {loading ? (
-                    <Skeleton className="h-7 w-[260px] md:w-[320px] rounded-md" />
+                    <>
+                      <Skeleton className="h-6 w-20 rounded-full" />
+                      <Skeleton className="h-6 w-28 rounded-full" />
+                      <Skeleton className="h-6 w-28 rounded-full" />
+                    </>
                   ) : (
-                    <div className="text-2xl md:text-3xl font-semibold leading-tight break-words flex items-center gap-2">
-                      {col?.name ?? "Collection"}
-                      <BsPatchCheckFill className="text-brandsec dark:text-brand text-md lg:text-lg" />
-                    </div>
+                    <>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-black/10 dark:bg-black/20 px-2.5 py-1 backdrop-blur">
+                        Items <b className="ml-1">{col?.itemsCount ?? 0}</b>
+                      </span>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-black/10 dark:bg-black/20 px-2.5 py-1 backdrop-blur">
+                        Floor <b className="ml-1">{(col?.floorPrice ?? 0).toFixed(3)} {symbol}</b>
+                      </span>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-black/10 dark:bg-black/20 px-2.5 py-1 backdrop-blur">
+                        Volume <b className="ml-1">{(col?.volume ?? 0).toFixed(3)} {symbol}</b>
+                      </span>
+                    </>
                   )}
-
-                  <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-                    {loading ? (
-                      <>
-                        <Skeleton className="h-6 w-20 rounded-full" />
-                        <Skeleton className="h-6 w-28 rounded-full" />
-                        <Skeleton className="h-6 w-28 rounded-full" />
-                      </>
-                    ) : (
-                      <>
-                        <span className="inline-flex items-center gap-1 rounded-full bg-black/10 dark:bg-black/20 px-2.5 py-1 backdrop-blur">
-                          Items <b className="ml-1">{col?.itemsCount ?? 0}</b>
-                        </span>
-                        <span className="inline-flex items-center gap-1 rounded-full bg-black/10 dark:bg-black/20 px-2.5 py-1 backdrop-blur">
-                          Floor <b className="ml-1">{(col?.floorPrice ?? 0).toFixed(3)} {symbol}</b>
-                        </span>
-                        <span className="inline-flex items-center gap-1 rounded-full bg-black/10 dark:bg-black/20 px-2.5 py-1 backdrop-blur">
-                          Volume <b className="ml-1">{(col?.volume ?? 0).toFixed(3)} {symbol}</b>
-                        </span>
-                      </>
-                    )}
-                  </div>
                 </div>
               </div>
+            </div>
 
-              {/* actions + currency */}
-              <div className="flex gap-2 lg:ml-auto items-center">
-                <div className="min-w-[140px]">
+            {/* actions — wraps nicely on mobile */}
+            <div className="sm:col-span-2 lg:col-span-1 lg:ml-auto">
+              <div className="flex flex-col sm:flex-row sm:flex-wrap gap-2">
+                {/* currency select */}
+                <div className="w-full sm:w-36 md:w-44">
                   <Select value={currencyId} onValueChange={setCurrencyId}>
-                    <SelectTrigger className="w-full">
+                    <SelectTrigger className="w-full h-9 sm:h-10">
                       <SelectValue placeholder="Currency" />
                     </SelectTrigger>
                     <SelectContent>
@@ -252,22 +255,23 @@ export default function FeaturedCollection({ className }: { className?: string }
                   </Select>
                 </div>
 
+                {/* primary actions */}
                 {loading ? (
                   <>
-                    <Skeleton className="h-10 w-40 rounded-xl" />
-                    <Skeleton className="h-10 w-48 rounded-xl" />
+                    <Skeleton className="h-10 w-full sm:w-40 rounded-xl" />
+                    <Skeleton className="h-10 w-full sm:w-48 rounded-xl" />
                   </>
                 ) : (
                   <>
                     <Link
                       href={col ? `/collections/${col.contract}` : "#"}
-                      className="inline-flex items-center justify-center rounded-xl px-4 py-2 font-semibold border border-white/15 bg-white/10 hover:bg-white/15 transition"
+                      className="inline-flex w-full sm:w-auto items-center justify-center rounded-xl px-4 py-2 font-semibold border border-white/15 bg-white/10 hover:bg-white/15 transition"
                     >
                       View collection
                     </Link>
                     <Link
                       href="/bid-featured-collection"
-                      className="inline-flex items-center justify-center rounded-xl px-4 py-2 font-medium border border-white/15 bg-black/5 hover:bg-black/10 dark:bg-transparent dark:hover:bg-white/10 text-foreground transition"
+                      className="inline-flex w-full sm:w-auto items-center justify-center rounded-xl px-4 py-2 font-medium border border-white/15 bg-black/5 hover:bg-black/10 dark:bg-transparent dark:hover:bg-white/10 text-foreground transition"
                     >
                       Bid to be featured
                     </Link>
@@ -275,70 +279,70 @@ export default function FeaturedCollection({ className }: { className?: string }
                 )}
               </div>
             </div>
+          </div>
 
-            {/* description */}
+          {/* description */}
+          {loading ? (
+            <div className="mt-3 space-y-2 max-w-3xl">
+              <Skeleton className="h-4 w-[80%]" />
+              <Skeleton className="h-4 w-[65%]" />
+            </div>
+          ) : col?.description ? (
+            <div className="mt-3 max-w-3xl text-sm text-muted-foreground">
+              <span className={descOpen ? "" : "line-clamp-3"}>{col.description}</span>
+              {col.description.length > 180 && (
+                <button
+                  type="button"
+                  onClick={() => setDescOpen((v) => !v)}
+                  className="ml-2 font-semibold text-brandsec dark:text-brand hover:underline"
+                >
+                  {descOpen ? "Show less" : "Read more"}
+                </button>
+              )}
+            </div>
+          ) : null}
+
+          {/* filters */}
+          <div className="mt-6">
             {loading ? (
-              <div className="mt-3 space-y-2 max-w-3xl">
-                <Skeleton className="h-4 w-[80%]" />
-                <Skeleton className="h-4 w-[65%]" />
-              </div>
-            ) : col?.description ? (
-              <div className="mt-3 max-w-3xl text-sm text-muted-foreground">
-                <span className={descOpen ? "" : "line-clamp-3"}>{col.description}</span>
-                {col.description.length > 180 && (
+              <Skeleton className="h-9 w-48 rounded-xl" />
+            ) : (
+              <div className="inline-flex rounded-xl border border-white/10 bg-white/5 p-1">
+                {FILTERS.map((f) => (
                   <button
+                    key={f.key}
                     type="button"
-                    onClick={() => setDescOpen((v) => !v)}
-                    className="ml-2 font-semibold text-brandsec dark:text-brand hover:underline"
+                    onClick={() => setFilter(f.key)}
+                    className={cn(
+                      "px-3 py-1.5 rounded-lg text-sm font-medium transition",
+                      filter === f.key ? "bg-white/15" : "hover:bg-white/10 text-muted-foreground"
+                    )}
                   >
-                    {descOpen ? "Show less" : "Read more"}
+                    {f.label}
                   </button>
-                )}
+                ))}
               </div>
-            ) : null}
+            )}
+          </div>
 
-            {/* filters */}
-            <div className="mt-6">
-              {loading ? (
-                <Skeleton className="h-9 w-48 rounded-xl" />
-              ) : (
-                <div className="inline-flex rounded-xl border border-white/10 bg-white/5 p-1">
-                  {FILTERS.map((f) => (
-                    <button
-                      key={f.key}
-                      type="button"
-                      onClick={() => setFilter(f.key)}
-                      className={cn(
-                        "px-3 py-1.5 rounded-lg text-sm font-medium transition",
-                        filter === f.key ? "bg-white/15" : "hover:bg-white/10 text-muted-foreground"
-                      )}
-                    >
-                      {f.label}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* carousel */}
-            <div
-              ref={ref}
-              className={cn(
-                "mt-3 -mx-2 px-2 pb-2",
-                "flex gap-3 overflow-x-auto scroll-smooth snap-x snap-mandatory",
-                "[-ms-overflow-style:none] [scrollbar-width:none]",
-                "[&::-webkit-scrollbar]:hidden"
-              )}
-            >
-              {loading
-                ? Array.from({ length: 10 }).map((_, i) => (
-                    <div key={`sk-${i}`} className="snap-start shrink-0 w-[82%] sm:w-[48%] md:w-[32%] lg:w-[24%] xl:w-[19%]">
-                      <Skeleton className="aspect-[4/5] rounded-2xl" />
-                    </div>
-                  ))
-                : items.map((it) => <FeaturedItemCard key={it.tokenId} col={col!} item={it} />)}
-              <div className="shrink-0 w-2" />
-            </div>
+          {/* carousel */}
+          <div
+            ref={ref}
+            className={cn(
+              "mt-3 -mx-2 px-2 pb-2",
+              "flex gap-3 overflow-x-auto scroll-smooth snap-x snap-mandatory",
+              "[-ms-overflow-style:none] [scrollbar-width:none]",
+              "[&::-webkit-scrollbar]:hidden"
+            )}
+          >
+            {loading
+              ? Array.from({ length: 10 }).map((_, i) => (
+                  <div key={`sk-${i}`} className="snap-start shrink-0 w-[82%] sm:w-[48%] md:w-[32%] lg:w-[24%] xl:w-[19%]">
+                    <Skeleton className="aspect-[4/5] rounded-2xl" />
+                  </div>
+                ))
+              : items.map((it) => <FeaturedItemCard key={it.tokenId} col={col!} item={it} />)}
+            <div className="shrink-0 w-2" />
           </div>
         </div>
       </div>
@@ -346,7 +350,7 @@ export default function FeaturedCollection({ className }: { className?: string }
   );
 }
 
-/* ── item card ── */
+/* ── item card (unchanged logic) ── */
 function FeaturedItemCard({ col, item }: { col: CollectionHeader; item: TopItem }) {
   const mediaUrl = React.useMemo(() => ipfsToHttp(item.imageUrl || ""), [item.imageUrl]);
   const mediaKind = React.useMemo<MediaKind>(() => inferKind(mediaUrl), [mediaUrl]);
@@ -415,7 +419,9 @@ function FeaturedItemCard({ col, item }: { col: CollectionHeader; item: TopItem 
               </span>
               <span className="inline-flex items-center gap-1 rounded-full bg-white/10 px-2 py-0.5">
                 Volume{" "}
-                <b className="ml-1">{item.volumeInCurrency != null ? `${item.volumeInCurrency.toFixed(2)} ${symbol}` : "—"}</b>
+                <b className="ml-1">
+                  {item.volumeInCurrency != null ? `${item.volumeInCurrency.toFixed(2)} ${symbol}` : "—"}
+                </b>
               </span>
             </div>
           </div>

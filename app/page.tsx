@@ -2,13 +2,16 @@
 export const dynamic = "force-dynamic";
 
 import AuctionsCarousel from "@/components/home/auctions-carousel";
+import Erc1155Spotlight from "@/components/home/erc1155-spotlight";
 import FeaturedCollection from "@/components/home/featured-collection-hero";
+import FixedListingsSpotlight from "@/components/home/fixed-listings-spotlight";
 import Hero from "@/components/home/hero";
 import MintingNowCarousel from "@/components/home/minting-now-carousel";
 import TopCollections from "@/components/home/top-collections";
 import Footer from "@/components/shared/footer";
 import Header from "@/components/shared/header";
 import type { Metadata } from "next";
+
 
 const TITLE = "Mint, Trade, and Discover Digital Assets with $ETN | Panthart";
 const DESCRIPTION =
@@ -90,7 +93,9 @@ export default async function Home() {
         <FeaturedCollection className="mt-6" />
         <TopCollections initialCollections={initialCollections} />
         <MintingNowCarousel />
+        <FixedListingsSpotlight className="my-20" />
         <AuctionsCarousel />
+        <Erc1155Spotlight className="my-20" />
       </main>
       <Footer />
     </section>

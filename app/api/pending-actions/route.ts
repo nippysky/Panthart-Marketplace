@@ -4,14 +4,14 @@ export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
 import prisma, { prismaReady } from "@/lib/db";
-import {
-  PendingChainActionType,
-  PendingStatus,
-  AuctionStatus,
-} from "@/lib/generated/prisma";
+import { PendingChainActionType, PendingStatus } from "@/lib/generated/prisma";
 import { publish, auctionTopic, walletTopic } from "@/lib/server/sse";
+import { readActiveAuctionSnapshot } from "@/lib/server/chain/marketplaceRead";
 
-/* ----------------------------- helpers ----------------------------- */
+/* -------------------------------------------------------------------------- */
+/* utils                                                                      */
+/* -------------------------------------------------------------------------- */
+
 function isHex32(s?: string): s is `0x${string}` {
   return !!s && /^0x[0-9a-fA-F]{64}$/.test(s);
 }
@@ -22,100 +22,65 @@ const EXPECTED_CHAIN = Number(
   process.env.NEXT_PUBLIC_CHAIN_ID || process.env.CHAIN_ID || 52014
 );
 
-/** Normalize anything (Decimal, string, number incl. scientific) to an integer string */
+/** Normalize anything (Decimal/string/number incl. scientific) to an integer string */
 function normalizeIntString(x: unknown): string {
   if (x == null) return "0";
   if (typeof x === "bigint") return x.toString();
-
-  let s: string;
-  if (typeof x === "string") {
-    s = x.trim();
-  } else if (typeof x === "number") {
-    // numbers may come in as 1e+21
-    s = String(x);
-  } else if ((x as any)?.toString) {
-    s = String((x as any).toString());
-  } else {
-    s = String(x);
-  }
+  let s = typeof x === "string" ? x : String((x as any)?.toString?.() ?? x);
   s = s.trim();
-
   if (s === "" || s === "-0" || s === "+0") return "0";
-
-  // If already a plain integer
   if (/^[+-]?\d+$/.test(s)) return s;
-
-  // If it's a pure decimal with only zero fractional part (e.g. "123.0000")
   if (/^[+-]?\d+\.\d+$/.test(s)) {
-    const [intPart, frac] = s.split(".");
-    if (/^0+$/.test(frac)) return intPart;
+    const [i, f] = s.split(".");
+    if (/^0+$/.test(f)) return i;
   }
-
-  // Scientific notation: 1.23e+6, -4e18, etc.
   const m = s.match(/^([+-]?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/);
   if (m) {
     const sign = m[1] || "";
-    const intPart = m[2];
-    const frac = m[3] || "";
-    const exp = parseInt(m[4], 10);
-
-    const digits = intPart + frac; // move decimal to the right over all frac digits first
-    if (exp >= 0) {
-      const zeros = exp - frac.length;
-      if (zeros >= 0) {
-        return (sign === "-" ? "-" : "") + digits + "0".repeat(zeros);
-      } else {
-        // Decimal point would end up inside the digits.
-        // We only want integers; truncate toward zero.
-        const cut = digits.length + zeros; // zeros is negative
-        if (cut <= 0) return "0"; // < 1 after truncation
-        return (sign === "-" ? "-" : "") + digits.slice(0, cut);
-      }
-    } else {
-      // Negative exponent -> number < 1 in magnitude; truncates to 0 for integers
-      return "0";
+    const i = m[2];
+    const f = m[3] || "";
+    const e = parseInt(m[4], 10);
+    const digits = i + f;
+    if (e >= 0) {
+      const zeros = e - f.length;
+      if (zeros >= 0) return (sign === "-" ? "-" : "") + digits + "0".repeat(zeros);
+      const cut = digits.length + zeros;
+      if (cut <= 0) return "0";
+      return (sign === "-" ? "-" : "") + digits.slice(0, cut);
     }
+    return "0";
   }
-
-  // Fallback: drop anything that is not a digit (and keep an optional leading sign)
   const fallback = s.replace(/^[^+\-0-9]+/, "").replace(/[^\d+-]/g, "");
-  if (fallback === "" || fallback === "+" || fallback === "-") return "0";
-  return fallback;
+  return fallback === "" || fallback === "+" || fallback === "-" ? "0" : fallback;
 }
 
-// Normalize Prisma Decimal | number | string -> bigint (non-throwing)
-function toBigInt(x: unknown | null | undefined): bigint {
-  const s = normalizeIntString(x);
+function toBigInt(x: unknown): bigint {
   try {
-    return BigInt(s);
+    return BigInt(normalizeIntString(x));
   } catch {
-    // If something still slips by, be safe and return 0
     return 0n;
   }
 }
 
-// Accepts prisma cuid/cuid2 or numeric ids (future-proof)
 function isDbIdOrNumeric(x?: string | null): x is string {
-  if (!x) return false;
-  // allow [a-z0-9_-] tokens (cuid/cuid2 variants) OR pure digits
-  return /^[A-Za-z0-9_-]+$/.test(x);
+  return !!x && /^[A-Za-z0-9_-]+$/.test(x);
 }
 
-/* ------------------------------ POST ------------------------------- */
+/* -------------------------------------------------------------------------- */
+/* POST                                                                        */
+/* -------------------------------------------------------------------------- */
 /**
- * Body (examples)
- * - Bid:
+ * Body for bids:
  * {
  *   "type": "NFT_AUCTION_BID",
- *   "txHash": "0xabc...",
- *   "from": "0xUser...",
+ *   "txHash": "0x…",
+ *   "from": "0x…",
  *   "chainId": 52014,
  *   "payload": {
- *     "auctionId": "<DB auction id (cuid)>",
- *     "bidAmountBaseUnits": "1234500000000000000",
- *     "currencyId": "clCur..." | null   // null for native
+ *     "auctionId": "<DB auction id>",
+ *     "bidAmountBaseUnits": "1234500000000000000"
  *   },
- *   "relatedId": "<same as payload.auctionId>"
+ *   "relatedId": "<same as auctionId>"
  * }
  */
 export async function POST(req: NextRequest) {
@@ -128,7 +93,6 @@ export async function POST(req: NextRequest) {
     const from = String(body?.from || "");
     const chainId = Number(body?.chainId);
     const payload = body?.payload ?? null;
-    const relatedId = body?.relatedId ? String(body.relatedId) : null;
 
     // basic guards
     if (
@@ -142,21 +106,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
     }
 
-    // Idempotent on txHash
+    // idempotent on txHash (retry-safe)
     const existing = await prisma.pendingChainAction.findUnique({
       where: { txHash },
     });
-    if (existing) {
-      return NextResponse.json(existing, { status: 200 });
-    }
+    if (existing) return NextResponse.json(existing, { status: 200 });
 
-    // ---- Implemented type(s)
+    // -----------------------------------------------------------------------
+    // Bid handling
+    // -----------------------------------------------------------------------
     if (typeStr === "NFT_AUCTION_BID") {
       const auctionId = String(payload?.auctionId || "");
       const bidAmountBaseUnits = String(payload?.bidAmountBaseUnits || "");
-      const currencyId = payload?.currencyId == null ? null : String(payload.currencyId);
 
-      // RELAXED: accept cuid/cuid2 (alphanumeric/underscore/dash) OR numeric
       if (!isDbIdOrNumeric(auctionId)) {
         return NextResponse.json({ error: "Invalid auctionId" }, { status: 400 });
       }
@@ -164,53 +126,87 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
       }
 
-      // Validate auction status + currency compatibility
-      const auction = await prisma.auction.findUnique({
+      // DB is the authority for currency; ignore any client currencyId
+      const dbAuction = await prisma.auction.findUnique({
         where: { id: auctionId },
         select: {
           id: true,
-          endTime: true,
           status: true,
+          endTime: true,
+          sellerAddress: true,
+          nft: { select: { contract: true, tokenId: true, standard: true } },
+          currency: { select: { id: true, tokenAddress: true } },
           currencyId: true,
-          highestBidEtnWei: true,
-          highestBidTokenAmount: true,
-          minIncrementEtnWei: true,
-          minIncrementTokenAmount: true,
-          startPriceEtnWei: true,
-          startPriceTokenAmount: true,
         },
       });
-
-      if (!auction || auction.status !== AuctionStatus.ACTIVE) {
-        return NextResponse.json({ error: "Auction not active" }, { status: 400 });
+      if (!dbAuction) {
+        return NextResponse.json({ error: "Auction not found" }, { status: 404 });
       }
+      const derivedCurrencyId = dbAuction.currencyId ?? null;
 
-      const now = new Date();
-      if (auction.endTime <= now) {
-        return NextResponse.json({ error: "Auction ended" }, { status: 400 });
-      }
+      // Chain guard (soft): read current snapshot; only block on clear errors.
+      try {
+        const MARKETPLACE = process.env
+          .NEXT_PUBLIC_MARKETPLACE_CORE_ADDRESS as `0x${string}`;
+        const collection = dbAuction.nft?.contract as `0x${string}`;
+        const tokenId = toBigInt(dbAuction.nft?.tokenId || "0");
+        const standard = (dbAuction.nft?.standard || "ERC721") as "ERC721" | "ERC1155";
+        const seller = dbAuction.sellerAddress as `0x${string}` | null;
 
-      // Currency must match auction config (native => currencyId null; token => must equal)
-      if ((auction.currencyId ?? null) !== (currencyId ?? null)) {
-        return NextResponse.json({ error: "Currency mismatch" }, { status: 400 });
-      }
+        const snap = await readActiveAuctionSnapshot({
+          marketplace: MARKETPLACE,
+          collection,
+          tokenId,
+          standard,
+          seller: standard === "ERC1155" ? (seller || undefined) : undefined,
+        });
 
-      // Optional: min increment guard (robust conversions now)
-      const isNative = !currencyId;
-      const highestBI = toBigInt(isNative ? auction.highestBidEtnWei : auction.highestBidTokenAmount);
-      const startBI   = toBigInt(isNative ? auction.startPriceEtnWei   : auction.startPriceTokenAmount);
-      const incBI     = toBigInt(isNative ? auction.minIncrementEtnWei : auction.minIncrementTokenAmount);
+        // --- patched post-facto validation ---------------------------------
+        if (snap) {
+          const nowSec = Math.floor(Date.now() / 1000);
+          if (snap.row.end <= nowSec) {
+            return NextResponse.json(
+              { error: "Auction already ended" },
+              { status: 400 }
+            );
+          }
 
-      const minRequiredBI = highestBI > 0n ? highestBI + incBI : startBI;
+          const highest = snap.row.highestBid ?? 0n;
+          const start = snap.row.startPrice ?? 0n;
+          const offer = toBigInt(bidAmountBaseUnits);
 
-      if (minRequiredBI > 0n && BigInt(bidAmountBaseUnits) < minRequiredBI) {
-        return NextResponse.json(
-          { error: "Bid below minimum increment" },
-          { status: 400 }
+          // If there was no prior bid, offer must clear start price.
+          // If there was a prior bid, offer must be >= the snapshot's highest.
+          // (If the snapshot already includes *this* new bid, offer == highest is OK.)
+          if (highest === 0n) {
+            if (offer < start) {
+              return NextResponse.json(
+                { error: "Bid below start price" },
+                { status: 400 }
+              );
+            }
+          } else {
+            if (offer < highest) {
+              return NextResponse.json(
+                { error: "Bid below current highest" },
+                { status: 400 }
+              );
+            }
+          }
+        } else {
+          console.warn(
+            "[pending-actions] snapshot unavailable; proceeding without guard"
+          );
+        }
+        // -------------------------------------------------------------------
+      } catch (e) {
+        console.warn(
+          "[pending-actions] chain guard soft-fail:",
+          (e as any)?.message || e
         );
       }
 
-      // Insert pending (enum value, not string)
+      // Insert pending row
       const row = await prisma.pendingChainAction.create({
         data: {
           type: PendingChainActionType.NFT_AUCTION_BID,
@@ -220,29 +216,28 @@ export async function POST(req: NextRequest) {
           payload: {
             auctionId,
             bidAmountBaseUnits,
-            currencyId, // null for native, DB id for ERC-20
+            currencyId: derivedCurrencyId, // authoritative from DB
           } as any,
           relatedId: auctionId,
           status: PendingStatus.PENDING,
         },
       });
 
-      // Push SSE "bid_pending" to auction room and wallet room (topics keyed by DB auction id)
-      const payloadOut = {
+      // Fan-out to SSE (auction room + bidder wallet room)
+      const out = {
         txHash,
         from,
         auctionId,
         amount: bidAmountBaseUnits,
-        currencyId,
+        currencyId: derivedCurrencyId,
         at: Date.now(),
       };
-      publish(auctionTopic(auctionId), "bid_pending", payloadOut);
-      publish(walletTopic(from), "bid_pending", payloadOut);
+      publish(auctionTopic(auctionId), "bid_pending", out);
+      publish(walletTopic(from), "bid_pending", out);
 
       return NextResponse.json(row, { status: 201 });
     }
 
-    // For now, reject other types explicitly (prevents enum mismatch)
     return NextResponse.json({ error: "Unsupported action type" }, { status: 400 });
   } catch (e) {
     console.error("[pending-actions POST] error:", e);
@@ -250,12 +245,13 @@ export async function POST(req: NextRequest) {
   }
 }
 
-/* ------------------------------- GET --------------------------------
- * Optional: list current user's pending actions (for a wallet)
- * /api/pending-actions?wallet=0xabc...&status=PENDING
- ---------------------------------------------------------------------*/
+/* -------------------------------------------------------------------------- */
+/* GET: list current user's pending actions (optional helper)                 */
+/* /api/pending-actions?wallet=0xabc...&status=PENDING                        */
+/* -------------------------------------------------------------------------- */
 export async function GET(req: NextRequest) {
   await prismaReady;
+
   const { searchParams } = new URL(req.url);
   const wallet = searchParams.get("wallet");
   const status = (searchParams.get("status") || "PENDING") as PendingStatus;

@@ -11,7 +11,7 @@ export default function Hero() {
         {/* Flex column; left-aligned on mobile, center-aligned on large screens */}
         <div className="flex flex-col items-start lg:items-center">
           <h1 className="text-left lg:text-center font-extrabold lg:text-[4.5rem] md:text-[3rem] text-[2rem] lg:leading-[6rem] leading-tight">
-            Mint, Trade, and Discover Digital Assets on <span className="text-brand">Electronuem</span>
+            Mint, Trade, and Discover NFTs on the <span className="text-brand">Electronuem</span> ecosystem.
           </h1>
 
           <div className="mt-10 text-left lg:text-center flex items-center gap-4 flex-wrap">

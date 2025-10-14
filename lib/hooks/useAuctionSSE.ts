@@ -1,15 +1,15 @@
+// lib/hooks/useAuctionSSE.ts
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
 
 /**
- * Unified SSE hook
+ * Unified SSE hook with watchdog
  * - Subscribes to BOTH:
  *    • Auction room:   /api/stream/auction/:auctionId
  *    • Wallet room:    /api/stream/wallet/:address  (optional)
- * - Handles named events:
- *    • bid_pending, bid_confirmed, bid_failed, auction_extended
- *    • auction_settled, auction_cancelled
+ * - Named events: bid_* , auction_* , ping, ready
+ * - Auto-reconnect if no 'ping' or 'ready' within watchdog window
  */
 
 type BidBase = {
@@ -56,19 +56,48 @@ type Options = {
   walletSubscribeUrlBuilder?: (wallet: string) => string;
 };
 
-function mkES(url: string, onOpen?: () => void) {
-  const es = new EventSource(url, { withCredentials: false });
-  if (onOpen) es.addEventListener("ready", () => onOpen());
-  es.onerror = () => { /* browser will auto-reconnect */ };
-  return es;
+function safeJSON<T = any>(s: string): T | undefined {
+  try { return JSON.parse(s) as T; } catch { return undefined; }
 }
 
-function safeJSON<T = any>(s: string): T | undefined {
-  try {
-    return JSON.parse(s) as T;
-  } catch {
-    return undefined;
-  }
+function makeManagedES(
+  url: string,
+  onMessage: (es: EventSource) => void,
+  onOpen?: () => void,
+  onSilentTimeout?: () => void
+) {
+  const es = new EventSource(url, { withCredentials: false });
+
+  const pingWindowMs = 35000; // if we don't see ready/ping within 35s, recycle
+  let lastSeen = Date.now();
+
+  const bump = () => { lastSeen = Date.now(); };
+
+  const t = setInterval(() => {
+    if (Date.now() - lastSeen > pingWindowMs) {
+      clearInterval(t);
+      try { es.close(); } catch {}
+      onSilentTimeout?.();
+    }
+  }, 5000);
+
+  es.addEventListener("ready", () => {
+    bump();
+    onOpen?.();
+  });
+  es.addEventListener("ping", () => bump());
+
+  es.onerror = () => { /* browser will try default reconnect; watchdog will also recycle */ };
+
+  // consumer wires handlers after create
+  onMessage(es);
+
+  return {
+    close() {
+      clearInterval(t);
+      try { es.close(); } catch {}
+    }
+  };
 }
 
 export function useAuctionSSE(
@@ -90,93 +119,137 @@ export function useAuctionSSE(
   const walletUrl = useMemo(() => {
     if (!wallet) return null;
     if (opts?.walletSubscribeUrlBuilder) return opts.walletSubscribeUrlBuilder(wallet);
-    // keep original casing in the URL; server route should normalize if needed
     return `/api/stream/wallet/${encodeURIComponent(wallet)}`;
   }, [wallet, opts?.walletSubscribeUrlBuilder]);
+
+  // Simple backoff
+  const backoffRef = useRef(1000);
 
   // --- Auction room ---
   useEffect(() => {
     if (!auctionUrl) return;
+    let stopped = false;
+    let current: { close: () => void } | null = null;
 
-    const es = mkES(auctionUrl, () => stableHandlers.current?.onReady?.());
+    const wire = () => {
+      if (stopped) return;
 
-    es.addEventListener("bid_pending", (e: MessageEvent) => {
-      const data = safeJSON<BidBase>(e.data);
-      if (data) stableHandlers.current?.onBidPending?.(data);
-    });
+      current = makeManagedES(
+        auctionUrl,
+        (es) => {
+          es.addEventListener("bid_pending", (e: MessageEvent) => {
+            const data = safeJSON<BidBase>(e.data);
+            if (data) stableHandlers.current?.onBidPending?.(data);
+          });
 
-    es.addEventListener("bid_confirmed", (e: MessageEvent) => {
-      const data = safeJSON<BidBase>(e.data);
-      if (data) stableHandlers.current?.onBidConfirmed?.(data);
-    });
+          es.addEventListener("bid_confirmed", (e: MessageEvent) => {
+            const data = safeJSON<BidBase>(e.data);
+            if (data) stableHandlers.current?.onBidConfirmed?.(data);
+          });
 
-    es.addEventListener("bid_failed", (e: MessageEvent) => {
-      const data = safeJSON<any>(e.data);
-      if (data) stableHandlers.current?.onBidFailed?.(data);
-    });
+          es.addEventListener("bid_failed", (e: MessageEvent) => {
+            const data = safeJSON<any>(e.data);
+            if (data) stableHandlers.current?.onBidFailed?.(data);
+          });
 
-    es.addEventListener("auction_extended", (e: MessageEvent) => {
-      const data = safeJSON<{ auctionId: string; newEndTimeSec: number }>(e.data);
-      if (data) stableHandlers.current?.onAuctionExtended?.(data);
-    });
+          es.addEventListener("auction_extended", (e: MessageEvent) => {
+            const data = safeJSON<{ auctionId: string; newEndTimeSec: number }>(e.data);
+            if (data) stableHandlers.current?.onAuctionExtended?.(data);
+          });
 
-    es.addEventListener("auction_settled", (e: MessageEvent) => {
-      const raw = safeJSON<any>(e.data);
-      if (!raw) return;
-      const normalized = {
-        auctionId: String(raw.auctionId),
-        status: (raw.status || "ENDED") as "ENDED",
-        winner: raw.winner ?? raw.highestBidder ?? null,
-        price: raw.price ?? raw.amount ?? null,
-        amount: raw.amount ?? raw.price ?? null,
-        blockNumber: raw.blockNumber,
-        txHash: raw.txHash,
-        at: Number(raw.at || Date.now()),
-      };
-      stableHandlers.current?.onAuctionSettled?.(normalized);
-    });
+          es.addEventListener("auction_settled", (e: MessageEvent) => {
+            const raw = safeJSON<any>(e.data);
+            if (!raw) return;
+            const normalized = {
+              auctionId: String(raw.auctionId),
+              status: (raw.status || "ENDED") as "ENDED",
+              winner: raw.winner ?? raw.highestBidder ?? null,
+              price: raw.price ?? raw.amount ?? null,
+              amount: raw.amount ?? raw.price ?? null,
+              blockNumber: raw.blockNumber,
+              txHash: raw.txHash,
+              at: Number(raw.at || Date.now()),
+            };
+            stableHandlers.current?.onAuctionSettled?.(normalized);
+          });
 
-    es.addEventListener("auction_cancelled", (e: MessageEvent) => {
-      const raw = safeJSON<any>(e.data);
-      if (!raw) return;
-      const normalized = {
-        auctionId: String(raw.auctionId),
-        status: (raw.status || "CANCELLED") as "CANCELLED",
-        blockNumber: raw.blockNumber,
-        txHash: raw.txHash,
-        at: Number(raw.at || Date.now()),
-      };
-      stableHandlers.current?.onAuctionCancelled?.(normalized);
-    });
+          es.addEventListener("auction_cancelled", (e: MessageEvent) => {
+            const raw = safeJSON<any>(e.data);
+            if (!raw) return;
+            const normalized = {
+              auctionId: String(raw.auctionId),
+              status: (raw.status || "CANCELLED") as "CANCELLED",
+              blockNumber: raw.blockNumber,
+              txHash: raw.txHash,
+              at: Number(raw.at || Date.now()),
+            };
+            stableHandlers.current?.onAuctionCancelled?.(normalized);
+          });
+        },
+        () => stableHandlers.current?.onReady?.(),
+        () => {
+          // silent timeout -> reconnect with backoff
+          if (stopped) return;
+          const wait = backoffRef.current;
+          backoffRef.current = Math.min(wait * 2, 8000);
+          setTimeout(wire, wait + Math.floor(Math.random() * 400));
+        }
+      );
+    };
+
+    // first connect
+    backoffRef.current = 1000;
+    wire();
 
     return () => {
-      try { es.close(); } catch {}
+      stopped = true;
+      current?.close();
     };
   }, [auctionUrl]);
 
   // --- Wallet room (optional) ---
   useEffect(() => {
     if (!walletUrl) return;
+    let stopped = false;
+    let current: { close: () => void } | null = null;
 
-    const es = mkES(walletUrl);
+    const wire = () => {
+      if (stopped) return;
 
-    es.addEventListener("bid_pending", (e: MessageEvent) => {
-      const data = safeJSON<BidBase>(e.data);
-      if (data) stableHandlers.current?.onBidPending?.(data);
-    });
+      current = makeManagedES(
+        walletUrl,
+        (es) => {
+          es.addEventListener("bid_pending", (e: MessageEvent) => {
+            const data = safeJSON<BidBase>(e.data);
+            if (data) stableHandlers.current?.onBidPending?.(data);
+          });
 
-    es.addEventListener("bid_confirmed", (e: MessageEvent) => {
-      const data = safeJSON<BidBase>(e.data);
-      if (data) stableHandlers.current?.onBidConfirmed?.(data);
-    });
+          es.addEventListener("bid_confirmed", (e: MessageEvent) => {
+            const data = safeJSON<BidBase>(e.data);
+            if (data) stableHandlers.current?.onBidConfirmed?.(data);
+          });
 
-    es.addEventListener("bid_failed", (e: MessageEvent) => {
-      const data = safeJSON<any>(e.data);
-      if (data) stableHandlers.current?.onBidFailed?.(data);
-    });
+          es.addEventListener("bid_failed", (e: MessageEvent) => {
+            const data = safeJSON<any>(e.data);
+            if (data) stableHandlers.current?.onBidFailed?.(data);
+          });
+        },
+        undefined,
+        () => {
+          if (stopped) return;
+          const wait = backoffRef.current;
+          backoffRef.current = Math.min(wait * 2, 8000);
+          setTimeout(wire, wait + Math.floor(Math.random() * 400));
+        }
+      );
+    };
+
+    backoffRef.current = 1000;
+    wire();
 
     return () => {
-      try { es.close(); } catch {}
+      stopped = true;
+      current?.close();
     };
   }, [walletUrl]);
 }

@@ -49,6 +49,7 @@ import ProfileCollectionsTab from "./profile-collections-tab";
 // ✅ Badge utils + chip
 import BadgeChip from "@/components/legends/badge-chip";
 import { getBadgeForCount, getNextBadge } from "@/lib/legends/badges";
+import WithdrawRefundsDialog from "./withdraw-refunds-dialog";
 
 /** Extend with itemsTotal + optional bio + legendsComrades (NFC owned) */
 type ProfileWithTotal = UserProfile & {
@@ -392,15 +393,19 @@ export default function MyProfileComponent({
               </button>
             )}
 
-            {isMine && (
-              <Button
-                variant="outline"
-                onClick={() => setEditOpen(true)}
-                disabled={saveMutation.isPending}
-              >
-                {saveMutation.isPending ? "Saving…" : "Edit Profile"}
-              </Button>
-            )}
+       {isMine && (
+  <div className="flex flex-wrap items-center gap-2">
+    <WithdrawRefundsDialog ownerAddress={addressKey} />
+    <Button
+      variant="outline"
+      onClick={() => setEditOpen(true)}
+      disabled={saveMutation.isPending}
+    >
+      {saveMutation.isPending ? "Saving…" : "Edit Profile"}
+    </Button>
+  </div>
+)}
+
           </div>
         </TooltipProvider>
       </div>

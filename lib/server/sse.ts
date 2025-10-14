@@ -3,12 +3,14 @@
    - Topics: "auction:<auctionId>", "wallet:<addressLower>"
    - publish(topic, event, payload) => fan-out to all connected clients for that topic
    - subscribe(topic) => ReadableStream for the route to return
+   - Robust: proper cleanup, keep-alive "ping" events, no leaks on disconnect.
 */
 
 type Sink = {
   id: string;
   enqueue: (chunk: Uint8Array) => void;
   closed: boolean;
+  stopHeartbeat: () => void;
 };
 
 type Topic = string;
@@ -30,11 +32,16 @@ export function publish(topic: string, event: string, data: unknown) {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   const bytes = enc.encode(payload);
 
-  for (const sink of sinks) {
+  for (const sink of Array.from(sinks)) {
     try {
       if (!sink.closed) sink.enqueue(bytes);
     } catch {
-      // ignore broken pipe
+      // broken pipe — mark closed and prune
+      try {
+        sink.closed = true;
+        sink.stopHeartbeat();
+      } catch {}
+      sinks.delete(sink);
     }
   }
 }
@@ -45,39 +52,36 @@ export function subscribe(topic: string) {
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
+      // register sink
+      const heartbeatMs = 15000; // 15s: friendly to most proxies/CDNs
+      const hb = setInterval(() => {
+        try {
+          controller.enqueue(enc.encode(`event: ping\ndata: ${Date.now()}\n\n`));
+        } catch {
+          /* swallow; cancel() will clean up */
+        }
+      }, heartbeatMs);
+
       sink = {
         id,
         closed: false,
         enqueue: (chunk) => controller.enqueue(chunk),
+        stopHeartbeat: () => clearInterval(hb),
       };
 
       if (!topics.has(topic)) topics.set(topic, new Set());
       topics.get(topic)!.add(sink);
 
-      // greet + instant retry-friendly headers
+      // immediate “ready” so client can confirm subscription and start its watchdog
       controller.enqueue(enc.encode(`event: ready\ndata: {"ok":true}\n\n`));
-
-      // keep-alive pings to prevent proxies from closing the stream
-      const iv = setInterval(() => {
-        try {
-          controller.enqueue(enc.encode(`: ping ${Date.now()}\n\n`));
-        } catch {
-          // swallowed
-        }
-      }, 20000);
-
-      // when the stream is canceled (client closed)
-      (controller as any)._onCancel = () => {
-        clearInterval(iv);
-        if (sink) {
-          sink.closed = true;
-          topics.get(topic)?.delete(sink);
-        }
-      };
     },
+
     cancel() {
       if (sink) {
         sink.closed = true;
+        try {
+          sink.stopHeartbeat();
+        } catch {}
         topics.get(topic)?.delete(sink);
       }
     },

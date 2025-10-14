@@ -125,16 +125,18 @@ export default function AuctionsCarousel() {
   };
 
   return (
-    <section className="w-full mb-20">
+    <section className="w-full my-20">
       <div className="flex w-full items-center justify-between px-2 lg:px-0">
         <h1 className="font-bold text-[1.2rem] lg:text-[2rem]">Live Auctions</h1>
         {!isMobile && (
-          <Link href="/auction">
-            <Button variant="link" className="flex items-center gap-2 font-bold">
-              More Auctions
-              <MoveRight />
-            </Button>
-          </Link>
+
+          
+                  <Button asChild variant="secondary" size="sm">
+          <Link href="/auction">View all</Link>
+        </Button>  
+ 
+
+
         )}
       </div>
 

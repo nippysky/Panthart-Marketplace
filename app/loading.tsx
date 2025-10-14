@@ -35,50 +35,35 @@ export default function GlobalLoadingOverlay() {
         />
       </div>
 
-      {/* card */}
-      <div
-        className="
-          relative isolate rounded-2xl
-          border border-black/10 dark:border-white/10
-          bg-white/55 dark:bg-neutral-900/55
-          shadow-xl backdrop-blur-2xl
-          w-[min(90vw,520px)]
-          px-5 py-4 sm:px-8 sm:py-6
-        "
-      >
-        <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
-          {/* spinner */}
-          <div className="flex justify-center sm:justify-start">
-            <svg
-              className="h-8 w-8 text-neutral-700 dark:text-neutral-300 motion-safe:animate-spin"
-              viewBox="0 0 24 24"
-              aria-hidden="true"
-            >
-              <circle
-                cx="12"
-                cy="12"
-                r="9"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="3"
-                strokeLinecap="round"
-                className="opacity-80"
-                strokeDasharray="60"
-                strokeDashoffset="20"
-              />
-            </svg>
-          </div>
+      {/* centered content (no card) */}
+      <div className="relative flex flex-col items-center gap-3 px-6 text-center">
+        <svg
+          className="h-8 w-8 text-neutral-800/90 dark:text-neutral-200/90 motion-safe:animate-spin"
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+        >
+          <circle
+            cx="12"
+            cy="12"
+            r="9"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="3"
+            strokeLinecap="round"
+            className="opacity-80"
+            strokeDasharray="60"
+            strokeDashoffset="20"
+          />
+        </svg>
 
-          <div className="w-full">
-            <p className="text-sm font-medium tracking-wide text-neutral-800/90 dark:text-neutral-200/90 text-center sm:text-left">
-              Patience, Comrade
-            </p>
-            <div className="mt-2 flex items-center justify-center sm:justify-start gap-1">
-              <span className="block h-1.5 w-1.5 rounded-full bg-neutral-700/90 dark:bg-neutral-300/90 motion-safe:animate-bounce [animation-delay:-0.2s]" />
-              <span className="block h-1.5 w-1.5 rounded-full bg-neutral-500/90 dark:bg-neutral-400/90 motion-safe:animate-bounce [animation-delay:-0.1s]" />
-              <span className="block h-1.5 w-1.5 rounded-full bg-neutral-400/90 dark:bg-neutral-500/90 motion-safe:animate-bounce" />
-            </div>
-          </div>
+        <p className="text-sm sm:text-base font-medium tracking-wide text-neutral-800/90 dark:text-neutral-200/90">
+          Patience, Comrade, Patience
+        </p>
+
+        <div className="mt-1 flex items-center justify-center gap-1">
+          <span className="block h-1.5 w-1.5 rounded-full bg-neutral-700/90 dark:bg-neutral-300/90 motion-safe:animate-bounce [animation-delay:-0.2s]" />
+          <span className="block h-1.5 w-1.5 rounded-full bg-neutral-500/90 dark:bg-neutral-400/90 motion-safe:animate-bounce [animation-delay:-0.1s]" />
+          <span className="block h-1.5 w-1.5 rounded-full bg-neutral-400/90 dark:bg-neutral-500/90 motion-safe:animate-bounce" />
         </div>
       </div>
 

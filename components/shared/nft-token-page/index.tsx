@@ -845,7 +845,22 @@ export default function NFTTokenPageComponent({
     if (!auctionId) return;
     try {
       showLoader("Finalizing auction…");
-      const txHash = await marketplace.finalizeAuction(auctionId);
+
+      // Prefer an SDK that returns structured info. Fallback: probe result after finalize.
+      const result: any = await marketplace.finalizeAuction(auctionId);
+      const txHash: string | undefined = result?.txHash ?? result; // support SDKs returning a string
+      let winner: string | undefined = result?.winner;
+      let priceWei: string | undefined = result?.priceWei;
+
+      // If SDK did not return winner/price, try to read final outcome from chain.
+      if (!winner || !priceWei) {
+        try {
+          const fin = await (marketplace as any).readAuctionResult?.(auctionId);
+          if (fin?.winner) winner = fin.winner;
+          if (fin?.priceWei) priceWei = fin.priceWei;
+        } catch {}
+      }
+
       hideLoader();
       toast.success("Auction finalized");
 
@@ -853,18 +868,24 @@ export default function NFTTokenPageComponent({
       await applyTransferToDB(txHash);
       await addActivity("TRANSFER", null, null, null, null, txHash);
 
-      try {
-        await fetch("/api/marketplace/auctions/attach-tx", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "FINALIZED",
-            contract: currentNFT.nftAddress,
-            tokenId: currentNFT.tokenId,
-            txHash,
-          }),
-        });
-      } catch {}
+      // Notify backend only if we have enough data to create a correct sale row.
+      if (winner && priceWei) {
+        try {
+          await fetch("/api/marketplace/auctions/attach-tx", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "ENDED", // <-- backend expects "ENDED"
+              auctionId: auctionId.toString(),
+              contract: currentNFT.nftAddress,
+              tokenId: currentNFT.tokenId,
+              winner,
+              priceWei,
+              txHash,
+            }),
+          });
+        } catch {}
+      }
 
       await refreshOnChainStates();
       await invalidateAll();

@@ -1,4 +1,3 @@
-// app/api/stream/wallet/[address]/route.ts
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 

@@ -13,8 +13,7 @@ type Body =
       contract: string;
       tokenId: string;
       bidder: string;
-      amountWei: string;
-      currencyAddress?: string | null;
+      amountWei: string;         // base units of bid
       txHash?: string | null;
       newEndTimeISO?: string | null;
     }
@@ -32,8 +31,7 @@ type Body =
       contract: string;
       tokenId: string;
       winner: string;
-      priceWei: string;
-      currencyAddress?: string | null;
+      priceWei: string;          // final price in base units
       royaltyPaidWei?: string | null;
       feePaidWei?: string | null;
       txHash?: string | null;
@@ -56,6 +54,7 @@ export async function POST(req: NextRequest) {
   if (!body?.action) return bad("Missing action");
 
   try {
+    /* ---------------- BID ---------------- */
     if (body.action === "BID") {
       const a = await prisma.auction.findUnique({
         where: { id: body.auctionId },
@@ -69,19 +68,21 @@ export async function POST(req: NextRequest) {
       });
       if (!a) return bad("Auction not found", 404);
 
-      // Update auction highest bid (best effort)
+      const isNative = a.currency?.kind === CurrencyKind.NATIVE;
+
+      // Update "highest bid" (best-effort)
       await prisma.auction.update({
         where: { id: a.id },
         data: {
           highestBidder: body.bidder,
-          ...(a.currency?.kind === CurrencyKind.NATIVE
+          ...(isNative
             ? { highestBidEtnWei: body.amountWei }
             : { highestBidTokenAmount: body.amountWei }),
           ...(body.newEndTimeISO ? { endTime: new Date(body.newEndTimeISO) } : {}),
         },
       });
 
-      // Activity log
+      // Activity log: BID (token-first rawData for ERC20)
       await prisma.nFTActivity.create({
         data: {
           nftId: a.nftId,
@@ -90,28 +91,27 @@ export async function POST(req: NextRequest) {
           type: "BID",
           fromAddress: body.bidder,
           toAddress: "",
-          priceEtnWei: a.currency?.kind === CurrencyKind.NATIVE ? (body.amountWei as any) : null,
+          priceEtnWei: isNative ? (body.amountWei as any) : null,
           txHash: body.txHash ?? `bid-${a.id}-${Date.now()}`,
           logIndex: 0,
           blockNumber: Math.floor(Date.now() / 1000),
           timestamp: new Date(),
           marketplace: "Panthart",
-          rawData:
-            a.currency?.kind === CurrencyKind.ERC20
-              ? {
-                  currencyAddress: a.currency?.tokenAddress,
-                  currencySymbol: a.currency?.symbol,
-                  amountWei: body.amountWei,
-                }
-              : undefined,
+          rawData: !isNative
+            ? {
+                currencyId: a.currency?.id,
+                amountWei: body.amountWei, // reader handles amountWei for bids
+              }
+            : undefined,
         },
       });
 
       return NextResponse.json({ ok: true });
     }
 
+    /* ------------- CANCELLED ------------- */
     if (body.action === "CANCELLED") {
-      // Prefer a direct id; otherwise resolve from (contract+tokenId[+seller])
+      // Prefer explicit id; otherwise resolve from (contract + tokenId [+ seller])
       let resolvedId = (body as any).auctionId as string | undefined;
 
       if (!resolvedId) {
@@ -147,16 +147,16 @@ export async function POST(req: NextRequest) {
         data: {
           status: AuctionStatus.CANCELLED,
           txHashCancelled: (body as any)?.txHash ?? undefined,
-          // optional: clamp endTime to 'now' so any UI using only endTime also stops
-          endTime: new Date(),
+          endTime: new Date(), // stop any countdown-only UI
         },
       });
 
-      // (Optional) you could also write a CANCELLED activity here if you like
+      // (Optional) You could also insert a "CANCELLED_AUCTION" activity here.
 
       return NextResponse.json({ ok: true });
     }
 
+    /* ---------------- ENDED --------------- */
     if (body.action === "ENDED") {
       const auc = await prisma.auction.findUnique({
         where: { id: body.auctionId },
@@ -171,13 +171,15 @@ export async function POST(req: NextRequest) {
       });
       if (!auc) return bad("Auction not found", 404);
 
+      const isNative = auc.currency?.kind === CurrencyKind.NATIVE;
+
       // Mark ENDED + tx hash
       await prisma.auction.update({
         where: { id: auc.id },
         data: { status: AuctionStatus.ENDED, txHashFinalized: body.txHash ?? undefined },
       });
 
-      // Update NFT owner to winner (721 path; for 1155 you'd manage balances table separately)
+      // Best-effort: reflect ownership to winner for 721 (harmless if 1155)
       await prisma.nFT
         .update({
           where: { id: auc.nftId },
@@ -189,20 +191,18 @@ export async function POST(req: NextRequest) {
         })
         .catch(() => {});
 
-      // Create sale row
+      // Canonical sale row (Activity tab reads from here for "Sale")
       await prisma.marketplaceSale.create({
         data: {
           nftId: auc.nftId,
           buyerAddress: body.winner,
           sellerAddress: auc.sellerAddress,
           quantity: auc.quantity,
-          priceEtnWei: auc.currency?.kind === CurrencyKind.NATIVE ? (body.priceWei as any) : "0",
+          priceEtnWei: isNative ? (body.priceWei as any) : "0",
           royaltyPaidWei: (body.royaltyPaidWei as any) ?? null,
           marketplaceFeePaidWei: (body.feePaidWei as any) ?? null,
-          currencyId:
-            auc.currency?.kind === CurrencyKind.ERC20 ? auc.currency?.id ?? undefined : undefined,
-          priceTokenAmount:
-            auc.currency?.kind === CurrencyKind.ERC20 ? (body.priceWei as any) : null,
+          currencyId: !isNative ? auc.currency?.id ?? undefined : undefined,
+          priceTokenAmount: !isNative ? (body.priceWei as any) : null,
           royaltyPaidTokenAmount: null,
           feePaidTokenAmount: null,
           royaltyRecipient: null,
@@ -214,7 +214,7 @@ export async function POST(req: NextRequest) {
         },
       });
 
-      // Activity (SALE)
+      // Activity (SALE). Use token-first rawData for ERC-20.
       await prisma.nFTActivity.create({
         data: {
           nftId: auc.nftId,
@@ -223,20 +223,18 @@ export async function POST(req: NextRequest) {
           type: "SALE",
           fromAddress: auc.sellerAddress,
           toAddress: body.winner,
-          priceEtnWei: auc.currency?.kind === CurrencyKind.NATIVE ? (body.priceWei as any) : null,
+          priceEtnWei: isNative ? (body.priceWei as any) : null,
           txHash: body.txHash ?? `auction-final-${auc.id}`,
           logIndex: 0,
           blockNumber: Math.floor(Date.now() / 1000),
           timestamp: new Date(),
           marketplace: "Panthart",
-          rawData:
-            auc.currency?.kind === CurrencyKind.ERC20
-              ? {
-                  currencyAddress: auc.currency?.tokenAddress,
-                  currencySymbol: auc.currency?.symbol,
-                  amountWei: body.priceWei,
-                }
-              : undefined,
+          rawData: !isNative
+            ? {
+                currencyId: auc.currency?.id,
+                priceTokenAmount: body.priceWei,
+              }
+            : undefined,
         },
       });
 

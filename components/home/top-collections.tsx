@@ -244,12 +244,9 @@ export default function TopCollections({ initialCollections = [] as TopItem[] })
             </Select>
           </div>
 
-          <Link href="/collections">
-            <Button variant="link" className="flex items-center gap-2 font-bold">
-              See All Collections
-              <MoveRight />
-            </Button>
-          </Link>
+         <Button asChild variant="secondary" size="sm">
+          <Link href="/collections">View all</Link>
+        </Button>
         </div>
       </div>
 

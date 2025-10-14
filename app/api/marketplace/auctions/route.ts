@@ -9,6 +9,7 @@ import prisma, { prismaReady } from "@/lib/db";
 function bad(msg: string, code = 400) {
   return NextResponse.json({ ok: false, error: msg }, { status: code });
 }
+
 const isPos = (s: string) => {
   const n = Number(s);
   return Number.isFinite(n) && n > 0;
@@ -17,6 +18,8 @@ const isNonNeg = (s: string) => {
   const n = Number(s);
   return Number.isFinite(n) && n >= 0;
 };
+
+/** Convert human (e.g. "1.23") into base-units string for given decimals. */
 function toWeiString(amount: string, decimals: number) {
   const [intPart = "0", fracRaw = ""] = String(amount).trim().split(".");
   if (!/^\d+$/.test(intPart) || (fracRaw && !/^\d+$/.test(fracRaw))) {
@@ -81,6 +84,7 @@ export async function POST(req: NextRequest) {
       return bad("End time must be later than start time");
     }
 
+    // Persist auction
     const auctionData: any = {
       nftId: nft.id,
       sellerAddress,
@@ -93,7 +97,9 @@ export async function POST(req: NextRequest) {
       minIncrementTokenAmount: null,
     };
 
-    if (currency.kind === "NATIVE") {
+    const isNative = currency.kind === "NATIVE";
+
+    if (isNative) {
       auctionData.startPriceEtnWei = startWei;
       auctionData.minIncrementEtnWei = incWei;
       auctionData.currencyId = null;
@@ -107,8 +113,14 @@ export async function POST(req: NextRequest) {
 
     const created = await prisma.auction.create({ data: auctionData });
 
+    // Activity: AUCTION (creation). Use token-first rawData for ERC20.
     await prisma.nFTActivity.upsert({
-      where: { txHash_logIndex: { txHash: created.txHashCreated ?? `auction-${created.id}`, logIndex: 0 } },
+      where: {
+        txHash_logIndex: {
+          txHash: created.txHashCreated ?? `auction-${created.id}`,
+          logIndex: 0,
+        },
+      },
       update: {},
       create: {
         nftId: nft.id,
@@ -117,20 +129,19 @@ export async function POST(req: NextRequest) {
         type: "AUCTION",
         fromAddress: sellerAddress,
         toAddress: "",
-        priceEtnWei: currency.kind === "NATIVE" ? (auctionData.startPriceEtnWei as string) : null,
+        priceEtnWei: isNative ? (auctionData.startPriceEtnWei as string) : null,
         txHash: created.txHashCreated ?? `auction-${created.id}`,
         logIndex: 0,
         blockNumber: created.createdAt.getTime() % 1_000_000_000,
         timestamp: created.createdAt,
         marketplace: "Panthart",
-        rawData:
-          currency.kind === "ERC20"
-            ? {
-                currencyAddress: currency.tokenAddress,
-                currencySymbol: currency.symbol,
-                amountWei: auctionData.startPriceTokenAmount,
-              }
-            : undefined,
+        rawData: !isNative
+          ? {
+              // token-first shape: lets the Activity reader resolve meta via currencyId
+              currencyId: currency.id,
+              priceTokenAmount: auctionData.startPriceTokenAmount,
+            }
+          : undefined,
       },
     });
 

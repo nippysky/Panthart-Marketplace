@@ -1,4 +1,3 @@
-// app/api/stream/auction/[auctionId]/route.ts
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
@@ -17,7 +16,6 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
-      // Allow browser EventSource on cross-origin if needed
       "Access-Control-Allow-Origin": "*",
     },
   });

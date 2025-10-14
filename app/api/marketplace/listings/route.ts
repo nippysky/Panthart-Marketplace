@@ -1,11 +1,15 @@
 /* app/api/marketplace/listings/route.ts */
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 import { NextRequest, NextResponse } from "next/server";
 import {
-  PrismaClient,
   Prisma,
   CurrencyKind,
   ListingStatus,
 } from "@/lib/generated/prisma";
+import prisma, { prismaReady } from "@/lib/db";
 
 /**
  * Convert a human string like "1.2345" to base units as a string (no decimals),
@@ -37,8 +41,6 @@ function parseISO(maybeISO?: string): Date | undefined {
   const d = new Date(maybeISO);
   return Number.isFinite(d.valueOf()) ? d : undefined;
 }
-
-const prisma = new PrismaClient();
 
 type Body = {
   contract: string;
@@ -146,6 +148,8 @@ async function resolveCurrency(body: Body) {
 }
 
 export async function POST(req: NextRequest) {
+  await prismaReady;
+
   try {
     const body = (await req.json()) as Body;
 
@@ -231,6 +235,37 @@ export async function POST(req: NextRequest) {
     };
 
     const created = await prisma.marketplaceListing.create({ data });
+
+    /* ----------------------------------------------------
+       NEW: Write a LISTING activity row at creation time
+       - Native: priceEtnWei
+       - ERC20 : rawData { currencyId, priceTokenAmount }
+       ---------------------------------------------------- */
+    const syntheticTx = body.txHashCreated ?? `listing-${created.id}`;
+    await prisma.nFTActivity.upsert({
+      where: { txHash_logIndex: { txHash: syntheticTx, logIndex: 0 } },
+      update: {},
+      create: {
+        nftId: nft.id,
+        contract: body.contract,
+        tokenId: String(body.tokenId),
+        type: "LISTING",
+        fromAddress: body.sellerAddress.toLowerCase(),
+        toAddress: "",
+        priceEtnWei: cur.isNative ? (priceBase as any) : null,
+        txHash: syntheticTx,
+        logIndex: 0,
+        blockNumber: Date.now() % 1_000_000_000,
+        timestamp: created.createdAt, // aligns UI timing with the record
+        marketplace: "Panthart",
+        rawData: cur.isNative
+          ? undefined
+          : {
+              currencyId: cur.row?.id,
+              priceTokenAmount: priceBase,
+            },
+      },
+    });
 
     return NextResponse.json(
       {

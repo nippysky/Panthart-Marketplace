@@ -7,8 +7,9 @@
  * - SSE topic remains DB auction id
  * - Optimistic UI preserved
  * - Boots from SSR `initialAuction` + full page skeleton gate (no flicker)
- * - NEW: disables bidding until the start time; shows "Starts In" until then
+ * - Disables bidding until the start time; shows "Starts In" until then
  * - Media container supports images + video (mp4/webm/ogg/mov) + gifs
+ * - NEW: Final-minutes chain polling (10–15s with jitter, visibility-aware)
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -641,6 +642,133 @@ export default function NFTAuctionPageComponent({
     : false;
 
   /* --------------------------------
+   * FINAL-MINUTES CHAIN POLL (belt & suspenders)
+   *  - Runs only in last N minutes
+   *  - Visibility-aware, 10–15s jittered cadence
+   * -------------------------------- */
+  const FINAL_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+  const isFinalWindow = useMemo(() => {
+    if (!auctionSnap.active || !auctionSnap.endISO) return false;
+    return endDeltaMs > 0 && endDeltaMs <= FINAL_WINDOW_MS;
+  }, [auctionSnap.active, auctionSnap.endISO, endDeltaMs]);
+
+  const lastChainRefreshAt = useRef<number>(0);
+
+  useEffect(() => {
+    if (!isFinalWindow || !contract || !tokenId || !nft?.standard) return;
+
+    let alive = true;
+    let timer: number | null = null;
+
+    const tick = async () => {
+      if (!alive) return;
+      // Only poll when tab is visible
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+        schedule(); // reschedule without doing work
+        return;
+      }
+
+      // Debounce vs rapid SSE bursts (avoid overlapping reads)
+      const nowTs = Date.now();
+      if (nowTs - lastChainRefreshAt.current < 5_000) {
+        schedule();
+        return;
+      }
+      lastChainRefreshAt.current = nowTs;
+
+      try {
+        const au =
+          nft?.standard === "ERC1155" && apiAuctionSeller
+            ? await marketplace.readActiveAuctionForSeller({
+                collection: contract as `0x${string}`,
+                tokenId: BigInt(tokenId),
+                standard: (nft?.standard ?? "ERC721") as Standard,
+                seller: apiAuctionSeller as `0x${string}`,
+              })
+            : await marketplace.readActiveAuction({
+                collection: contract as `0x${string}`,
+                tokenId: BigInt(tokenId),
+                standard: (nft?.standard ?? "ERC721") as Standard,
+              });
+
+        if (!alive) return;
+
+        if (!au) {
+          // Chain says no active auction anymore → mark ended
+          setAuctionIdOnChain(null);
+          setAuctionSnap((s) => ({ ...s, active: false }));
+          return;
+        }
+
+        const decimals = decimalsRef.current;
+        const endISO = au.row.end ? new Date(Number(au.row.end) * 1000).toISOString() : sEndISO();
+
+        // Update critical fields if changed (end time, highest bid/bidder, bids count)
+        setAuctionSnap((s) => {
+          const highestBidHuman =
+            au.row.highestBid && au.row.highestBid > 0n
+              ? String(Number(au.row.highestBid) / 10 ** decimals)
+              : s.highestBidHuman;
+
+          const highestBidder = au.row.highestBidder ? String(au.row.highestBidder) : s.highestBidder ?? null;
+          const bidsCount = Number(au.row.bidsCount || s.bidsCount || 0);
+
+          // Avoid state churn if nothing important changed
+          const same =
+            s.endISO === endISO &&
+            s.highestBidHuman === highestBidHuman &&
+            (s.highestBidder || null) === (highestBidder || null) &&
+            s.bidsCount === bidsCount;
+
+          if (same) return s;
+
+          return {
+            ...s,
+            endISO,
+            highestBidHuman,
+            highestBidder,
+            bidsCount,
+          };
+        });
+      } catch {
+        // Silent—SSE remains the primary rail
+      } finally {
+        schedule();
+      }
+    };
+
+    const sEndISO = () => auctionSnap.endISO || null;
+
+    const schedule = () => {
+      // jitter: 10–15s
+      const jitterMs = 10_000 + Math.floor(Math.random() * 5_000);
+      timer = window.setTimeout(tick, jitterMs);
+    };
+
+    // Listen for visibility changes to wake polling
+    const onVis = () => {
+      if (!alive) return;
+      if (document.visibilityState === "visible") {
+        // Trigger a quick refresh when tab is focused
+        lastChainRefreshAt.current = 0;
+        if (timer) window.clearTimeout(timer);
+        tick();
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+
+    // Start
+    tick();
+
+    return () => {
+      alive = false;
+      document.removeEventListener("visibilitychange", onVis);
+      if (timer) window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFinalWindow, contract, tokenId, nft?.standard, apiAuctionSeller]);
+
+  /* --------------------------------
    * Bid form (with "Max" chip and validation)
    * -------------------------------- */
   const [bidInput, setBidInput] = useState("");
@@ -721,27 +849,34 @@ export default function NFTAuctionPageComponent({
         tx = await contractMkt.bid(BigInt(auctionIdOnChain), wei, { value: wei });
       }
 
-      try {
-        await fetch("/api/pending-actions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            type: "NFT_AUCTION_BID",
-            txHash: tx.hash,
-            from: account.address,
-            chainId: Number(chainId),
-            payload: {
-              auctionId: auctionIdDb,
-              bidAmountBaseUnits: wei.toString(),
-              currencyId: currencyIdDb ?? null,
-            },
-            relatedId: auctionIdDb,
-          }),
-        });
-      } catch {
-      } finally {
-        loader.hide();
-      }
+try {
+  const res = await fetch("/api/pending-actions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      type: "NFT_AUCTION_BID",
+      txHash: tx.hash,
+      from: account.address,
+      chainId: Number(chainId),
+      payload: {
+        auctionId: auctionIdDb,
+        bidAmountBaseUnits: wei.toString(),
+        // currencyId no longer needed; server derives from DB
+      },
+      relatedId: auctionIdDb,
+    }),
+  });
+
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}));
+    const msg = j?.error || `Server rejected (HTTP ${res.status})`;
+    toast.error(msg);
+  }
+} catch {
+  // ignore (non-fatal for UX)
+} finally {
+  loader.hide();
+}
 
       toast.success("Bid submitted! Waiting to confirm…");
       setBidInput("");
@@ -875,6 +1010,9 @@ export default function NFTAuctionPageComponent({
    * -------------------------------- */
   const kind = mediaKind(nft?.image);
 
+  // Fine-grained shimmer placeholders for stats row if specific values aren’t ready
+  const statSkeleton = <Skeleton className="h-6 w-24 animate-pulse" />;
+
   return (
     <section className="flex-1 py-6 sm:py-8">
       {/* Breadcrumb */}
@@ -889,7 +1027,7 @@ export default function NFTAuctionPageComponent({
         {contract && tokenId && (
           <>
             <span className="opacity-60">/</span>
-            <Link href={`/collections/${contract}/1`} className="hover:underline font-mono">
+            <Link href={`/collections/${contract}/${tokenId}`} className="hover:underline font-mono">
               {contract.slice(0, 6)}…{contract.slice(-4)}
             </Link>
             <span className="opacity-60">/</span>
@@ -1041,13 +1179,11 @@ export default function NFTAuctionPageComponent({
                 <div className="text-xl sm:text-2xl font-semibold mt-1 break-words">
                   {auctionSnap.highestBidHuman
                     ? `${auctionSnap.highestBidHuman} ${auctionSnap.currencySymbol}`
-                    : auctionSnap.startPriceHuman
-                    ? `${auctionSnap.startPriceHuman} ${auctionSnap.currencySymbol}`
-                    : "—"}
+                    : statSkeleton}
                 </div>
 
                 {/* Highest bidder face/name */}
-                {auctionSnap.highestBidder && (
+                {auctionSnap.highestBidder ? (
                   <div className="mt-2 flex items-center gap-2 min-w-0">
                     <Image
                       src={highestBidderMeta?.avatarUrl || dicebear(auctionSnap.highestBidder)}
@@ -1066,17 +1202,19 @@ export default function NFTAuctionPageComponent({
                         : `${auctionSnap.highestBidder.slice(0, 6)}…${auctionSnap.highestBidder.slice(-4)}`}
                     </Link>
                   </div>
+                ) : (
+                  <div className="mt-2"><Skeleton className="h-4 w-28" /></div>
                 )}
               </div>
 
-              <Stat
-                label="Min Increment"
-                value={
-                  auctionSnap.minIncrementHuman
+              <div className="min-w-0">
+                <small className="text-muted-foreground">Min Increment</small>
+                <div className="text-xl font-semibold mt-1 break-words">
+                  {auctionSnap.minIncrementHuman
                     ? `${auctionSnap.minIncrementHuman} ${auctionSnap.currencySymbol}`
-                    : "—"
-                }
-              />
+                    : statSkeleton}
+                </div>
+              </div>
 
               <div className="min-w-0">
                 <small className="text-muted-foreground inline-flex items-center gap-1">
@@ -1096,17 +1234,21 @@ export default function NFTAuctionPageComponent({
                       </>
                     )
                   ) : (
-                    "—"
+                    statSkeleton
                   )}
                 </div>
 
                 {/* Wrap-friendly Start/End */}
                 <div className="mt-2 text-xs text-muted-foreground grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 leading-relaxed">
-                  {auctionSnap.startISO && (
+                  {auctionSnap.startISO ? (
                     <span className="break-words">Start: {new Date(auctionSnap.startISO).toLocaleString()}</span>
+                  ) : (
+                    <Skeleton className="h-3 w-40" />
                   )}
-                  {auctionSnap.endISO && (
+                  {auctionSnap.endISO ? (
                     <span className="break-words">End: {new Date(auctionSnap.endISO).toLocaleString()}</span>
+                  ) : (
+                    <Skeleton className="h-3 w-40" />
                   )}
                 </div>
               </div>
@@ -1168,7 +1310,7 @@ export default function NFTAuctionPageComponent({
               <div className="mt-2 text-xs text-muted-foreground flex items-center gap-2">
                 <span>Minimum required:</span>
                 <span className="font-semibold">
-                  {minRequiredHuman} {auctionSnap.currencySymbol}
+                  {Number.isFinite(minRequiredHuman) ? `${minRequiredHuman} ${auctionSnap.currencySymbol}` : "—"}
                 </span>
                 {!minValid && bidInput && <span className="text-red-500">Enter your bid.</span>}
               </div>

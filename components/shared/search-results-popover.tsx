@@ -10,15 +10,83 @@ type GroupKey = "users" | "collections" | "nfts";
 interface SearchItem {
   id: string;
   label: string;
-  image: string;
+  image: string;      // may be image or video url
   href: string;
-  type: GroupKey;       // keep in sync with API
-  subtitle?: string;    // optional: wallet, symbol, tokenId, etc.
+  type: GroupKey;     // keep in sync with API
+  subtitle?: string;
 }
 
 const PLACEHOLDER =
   "https://res.cloudinary.com/dx1bqxtys/image/upload/v1750638432/panthart/amy5m5u7nxmhlh8brv6d.png";
 
+/* ---------------- helpers ---------------- */
+const VIDEO_EXT_RE = /\.(mp4|mov|webm|ogg|m4v|mpeg)(\?.*)?$/i;
+const isVideoUrl = (u?: string) => !!u && VIDEO_EXT_RE.test(u || "");
+
+const avatarClass = (type: GroupKey) =>
+  type === "users" ? "rounded-full" : type === "collections" ? "rounded-xl" : "rounded-md";
+
+/** Unifies image/video rendering and handles graceful fallback */
+function MediaThumb({
+  src,
+  alt,
+  type,
+}: {
+  src?: string | null;
+  alt: string;
+  type: GroupKey;
+}) {
+  const [fallback, setFallback] = useState(false);
+  const rounded = avatarClass(type);
+  const base = `object-cover w-10 h-10 ${rounded}`;
+
+  if (!src || fallback) {
+    return (
+      <img
+        src={PLACEHOLDER}
+        alt={alt}
+        width={40}
+        height={40}
+        className={base}
+      />
+    );
+  }
+
+  if (isVideoUrl(src)) {
+    return (
+      <video
+        src={src}
+        className={base}
+        muted
+        loop
+        playsInline
+        autoPlay
+        preload="metadata"
+        // show a frame quickly even if the video is long
+        onLoadedMetadata={(e) => {
+          try {
+            // tiny seek so some browsers paint a frame immediately
+            if (e.currentTarget.currentTime < 0.11) e.currentTarget.currentTime = 0.1;
+          } catch {}
+        }}
+        onError={() => setFallback(true)}
+      />
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      width={40}
+      height={40}
+      className={base}
+      onError={() => setFallback(true)}
+    />
+  );
+}
+
+/* ---------------- component ---------------- */
 export default function SearchResultsPopover({
   open,
   onClose,
@@ -28,12 +96,10 @@ export default function SearchResultsPopover({
   open: boolean;
   onClose: () => void;
   searchTerm: string;
-  // Accept both ref flavors and allow null current:
   anchorRef:
     | React.RefObject<HTMLElement>
     | React.MutableRefObject<HTMLElement | null>;
 }) {
-
   const [results, setResults] = useState<{
     users: SearchItem[];
     collections: SearchItem[];
@@ -60,7 +126,7 @@ export default function SearchResultsPopover({
 
   // Fetch as user types (debounced)
   useEffect(() => {
-    if (!open) return; // if closed, don't fetch
+    if (!open) return;
     if (!searchTerm.trim()) {
       setResults(null);
       return;
@@ -110,9 +176,9 @@ export default function SearchResultsPopover({
       const a = anchorRef.current;
       const target = e.target as Node | null;
       if (!p || !a || !target) return;
-      const clickedInsidePopover = p.contains(target);
-      const clickedInsideAnchor = a.contains(target);
-      if (!clickedInsidePopover && !clickedInsideAnchor) onClose();
+      const insidePopover = p.contains(target);
+      const insideAnchor = a.contains(target);
+      if (!insidePopover && !insideAnchor) onClose();
     };
     document.addEventListener("mousedown", handleDown);
     document.addEventListener("touchstart", handleDown, { passive: true });
@@ -122,7 +188,7 @@ export default function SearchResultsPopover({
     };
   }, [open, onClose, anchorRef]);
 
-  // Keyboard nav (only while open)
+  // Keyboard nav
   useEffect(() => {
     if (!open || !flatList.length) return;
     const handler = (e: KeyboardEvent) => {
@@ -144,12 +210,6 @@ export default function SearchResultsPopover({
     return () => window.removeEventListener("keydown", handler);
   }, [open, flatList, highlighted, onClose]);
 
-  const getImageStyle = (type: GroupKey) => {
-    if (type === "users") return "rounded-full";
-    if (type === "collections") return "rounded-xl";
-    return "rounded-md"; // nfts
-  };
-
   const renderGroup = (items: SearchItem[], label: string, offset: number) =>
     items.length ? (
       <div className="mb-3" key={label}>
@@ -169,18 +229,11 @@ export default function SearchResultsPopover({
               ].join(" ")}
               onMouseEnter={() => setHighlighted(idx)}
               onClick={() => onClose()}
+              prefetch={false}
             >
-              {/* image */}
-              <img
-                src={it.image || PLACEHOLDER}
-                alt={it.label}
-                width={40}
-                height={40}
-                className={`object-cover w-10 h-10 ${getImageStyle(it.type)}`}
-                onError={(e) => {
-                  (e.currentTarget as HTMLImageElement).src = PLACEHOLDER;
-                }}
-              />
+              {/* media thumb (image or autoplaying video) */}
+              <MediaThumb src={it.image} alt={it.label} type={it.type} />
+
               {/* text */}
               <div className="flex flex-col">
                 <span className="text-foreground">{it.label}</span>

@@ -56,18 +56,40 @@ function decimalStrToFloat(decStr: string, decimals: number) {
 
 type CurrencyMeta = { symbol: string; decimals: number };
 
-/** Try to read ETN price first; fallback to ERC20 info from rawData */
+/**
+ * Price resolver for NFTActivity rows.
+ * Priority:
+ *   1) priceEtnWei (native ETN)
+ *   2) rawData.currencyId + rawData.priceTokenAmount   (new server shape)
+ *   3) rawData.currencyAddress + rawData.amountWei     (legacy shape)
+ */
 function priceFromActivityRow(
   row: any,
-  currenciesByAddr: Map<string, CurrencyMeta>
+  currenciesByAddr: Map<string, CurrencyMeta>,
+  currenciesById: Map<string, CurrencyMeta>
 ) {
+  // Native
   if (row.priceEtnWei != null) {
     const wei =
       typeof row.priceEtnWei === "string" ? row.priceEtnWei : String(row.priceEtnWei);
     return { amount: decimalStrToFloat(wei, ETN_DECIMALS), symbol: "ETN" as const };
   }
+
   const raw = (row.rawData ?? {}) as any;
-  if (raw?.currencyAddress && raw?.amountWei) {
+
+  // New (ID-based) shape
+  if (raw?.currencyId && raw?.priceTokenAmount != null) {
+    const meta = currenciesById.get(String(raw.currencyId));
+    if (meta) {
+      return {
+        amount: decimalStrToFloat(String(raw.priceTokenAmount), meta.decimals),
+        symbol: meta.symbol,
+      };
+    }
+  }
+
+  // Legacy (address-based) shape
+  if (raw?.currencyAddress && raw?.amountWei != null) {
     const addr = String(raw.currencyAddress).toLowerCase();
     const meta = currenciesByAddr.get(addr);
     if (meta) {
@@ -77,6 +99,7 @@ function priceFromActivityRow(
       };
     }
   }
+
   return { amount: null as number | null, symbol: null as string | null };
 }
 
@@ -124,7 +147,7 @@ export async function GET(
       currenciesById.set(c.id, meta);
     }
 
-    // Activity rows from NFTActivity (already normalized to ETN or rawData for tokens)
+    // Activities (client + server created)
     const actRows = await prisma.nFTActivity.findMany({
       where: {
         contract: { equals: contract, mode: "insensitive" },
@@ -147,7 +170,7 @@ export async function GET(
       },
     });
 
-    // Confirmed sales
+    // Confirmed sales (canonical source of truth for sales)
     const saleRows = await prisma.marketplaceSale.findMany({
       where: { nftId: nft.id },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
@@ -178,52 +201,22 @@ export async function GET(
       marketplace?: string | null;
     };
 
-    // Map activities
-    const mappedActs: UiRow[] = actRows
-      .map((r) => {
-        const priceMeta = priceFromActivityRow(r, currenciesByAddr);
-        let uiType = r.type?.toUpperCase?.() || "";
-        let via: string | null = r.marketplace ?? null;
-        if (uiType === "AUCTION") {
-          uiType = "LISTING";
-          via = "Auction";
-        } else if (uiType === "CANCELLED_AUCTION") {
-          uiType = "UNLISTING";
-          via = "Auction";
-        }
-
-        const tx = isRealHash(r.txHash) ? r.txHash : "";
-
-        return {
-          id: `act-${r.id}`,
-          type: toTitle(uiType),
-          fromAddress: r.fromAddress,
-          toAddress: r.toAddress,
-          price: priceMeta.amount,
-          currencySymbol: priceMeta.symbol,
-          timestamp: r.timestamp.toISOString(),
-          txHash: tx, // sanitize synthetic hashes
-          marketplace: via,
-        };
-      })
-      // don't keep synthetic SALE rows; the confirmed sale below is the source of truth
-      .filter((r) => !(r.type === "Sale" && !isRealHash(r.txHash)));
-
-    // Map confirmed sales
+    /* ---- 1) Map confirmed sales (token-first) ---- */
     const mappedSales: UiRow[] = saleRows.map((s) => {
       let amount: number | null = null;
       let symbol: string | null = null;
 
-      if (s.priceEtnWei != null) {
-        const weiStr = (s.priceEtnWei as any).toString();
-        amount = decimalStrToFloat(weiStr, ETN_DECIMALS);
-        symbol = "ETN";
-      } else if (s.priceTokenAmount != null && s.currencyId) {
+      // If token price is present, prefer it over ETN
+      if (s.priceTokenAmount != null && s.currencyId) {
         const weiStr = (s.priceTokenAmount as any).toString();
         const meta = currenciesById.get(s.currencyId);
         const dec = meta?.decimals ?? 18;
         amount = decimalStrToFloat(weiStr, dec);
         symbol = meta?.symbol ?? null;
+      } else if (s.priceEtnWei != null) {
+        const weiStr = (s.priceEtnWei as any).toString();
+        amount = decimalStrToFloat(weiStr, ETN_DECIMALS);
+        symbol = "ETN";
       }
 
       return {
@@ -234,12 +227,58 @@ export async function GET(
         price: amount,
         currencySymbol: symbol,
         timestamp: s.timestamp.toISOString(),
-        txHash: isRealHash(s.txHash) ? s.txHash : "", // should always be real, but guard anyway
+        txHash: isRealHash(s.txHash) ? s.txHash : "", // should be real, but guard anyway
         marketplace: "Panthart",
       };
     });
 
-    // Merge + de-dupe
+    // Build a quick lookup for sale tx hashes to suppress same-tx transfers
+    const saleHashSet = new Set<string>(
+      mappedSales.map((r) => (isRealHash(r.txHash) ? r.txHash : "")).filter(Boolean)
+    );
+
+    /* ---- 2) Map activity rows (and suppress noise) ---- */
+    const mappedActs: UiRow[] = actRows
+      .map((r) => {
+        const priceMeta = priceFromActivityRow(r, currenciesByAddr, currenciesById);
+
+        // Normalize some labels for UI
+        let uiType = r.type?.toUpperCase?.() || "";
+        let via: string | null = r.marketplace ?? null;
+        if (uiType === "AUCTION") {
+          uiType = "LISTING";
+          via = "Auction";
+        } else if (uiType === "CANCELLED_AUCTION") {
+          uiType = "UNLISTING";
+          via = "Auction";
+        }
+
+        // Only treat as "real" if it's a full hash
+        const tx = isRealHash(r.txHash) ? r.txHash : "";
+
+        return {
+          id: `act-${r.id}`,
+          type: toTitle(uiType),
+          fromAddress: r.fromAddress,
+          toAddress: r.toAddress,
+          price: priceMeta.amount,
+          currencySymbol: priceMeta.symbol,
+          timestamp: r.timestamp.toISOString(),
+          txHash: tx,
+          marketplace: via,
+        };
+      })
+      .filter((row) => {
+        // 2a) Drop synthetic Sale rows (we keep canonical sale list only)
+        if (row.type === "Sale" && !isRealHash(row.txHash)) return false;
+        // 2b) Suppress Transfer rows that share a tx with a Sale (the Sale card is the one we want)
+        if (row.type === "Transfer" && isRealHash(row.txHash) && saleHashSet.has(row.txHash)) {
+          return false;
+        }
+        return true;
+      });
+
+    /* ---- 3) Merge, de-dupe, and sort ---- */
     const rawMerged = [...mappedActs, ...mappedSales];
 
     const seen = new Set<string>();
@@ -249,7 +288,6 @@ export async function GET(
       const key = isRealHash(row.txHash)
         ? `${row.type}|${row.txHash}`
         : `${row.type}|${row.timestamp}|${row.fromAddress}|${row.toAddress}|${row.price ?? ""}`;
-
       if (seen.has(key)) continue;
       seen.add(key);
       deduped.push(row);
@@ -269,7 +307,12 @@ export async function GET(
   }
 }
 
-/* ---------- POST: log an app-side activity row ---------- */
+/* ---------- POST: log an app-side activity row ----------
+   Accepts either:
+     - Native: { priceWei: string } and NO currencyId/currencyAddress
+     - Token by ADDRESS (legacy): { currencyAddress, currencySymbol?, priceWei }
+     - Token by ID (preferred): { currencyId, priceTokenAmount }
+*/
 export async function POST(
   req: NextRequest,
   context: { params: Promise<{ contract: string; tokenId: string }> }
@@ -283,12 +326,22 @@ export async function POST(
 
   try {
     const body = await req.json();
+
     const type = canonType(body?.type);
     const fromAddress: string | null = body?.fromAddress ?? null;
     const toAddress: string | null = body?.toAddress ?? null;
+
+    // Native or legacy token (address) amount field
     const priceWeiStr: string | null = body?.priceWei ?? null;
+
+    // Token by address (legacy)
     const currencyAddress: string | null = body?.currencyAddress ?? null;
     const currencySymbol: string | null = body?.currencySymbol ?? null;
+
+    // Token by ID (preferred new shape)
+    const currencyId: string | null = body?.currencyId ?? null;
+    const priceTokenAmount: string | null = body?.priceTokenAmount ?? null;
+
     const txHash: string = body?.txHash || ZERO_TX(crypto.randomUUID());
     const logIndex: number = Number.isFinite(body?.logIndex) ? Number(body.logIndex) : 0;
     const blockNumber: number = Number.isFinite(body?.blockNumber) ? Number(body.blockNumber) : 0;
@@ -301,7 +354,14 @@ export async function POST(
     });
     if (!nft) return NextResponse.json({ error: "NFT not found" }, { status: 404 });
 
-    // String works for Prisma.Decimal
+    // Decide how to store price:
+    // - If currencyId present: token price by id (preferred) -> rawData { currencyId, priceTokenAmount }
+    // - Else if currencyAddress present: legacy token by address -> rawData { currencyAddress, ...amountWei }
+    // - Else: native ETN -> priceEtnWei
+    const isTokenById = Boolean(currencyId && priceTokenAmount != null);
+    const isTokenByAddr = !isTokenById && Boolean(currencyAddress && priceWeiStr != null);
+    const isNative = !isTokenById && !isTokenByAddr;
+
     const data = {
       nft: { connect: { id: nft.id } },
       contract,
@@ -309,17 +369,22 @@ export async function POST(
       type,
       fromAddress: fromAddress ?? "",
       toAddress: toAddress ?? "",
-      priceEtnWei: currencyAddress ? null : priceWeiStr ?? null,
+      priceEtnWei: isNative ? priceWeiStr ?? null : null,
       txHash,
       logIndex,
       blockNumber,
       timestamp,
       marketplace: marketplace ?? undefined,
-      rawData: currencyAddress
+      rawData: isTokenById
+        ? {
+            currencyId,
+            priceTokenAmount, // string base units
+          }
+        : isTokenByAddr
         ? {
             currencyAddress,
             currencySymbol: currencySymbol ?? undefined,
-            amountWei: priceWeiStr ?? undefined,
+            amountWei: priceWeiStr ?? undefined, // legacy name
           }
         : undefined,
     } as const;

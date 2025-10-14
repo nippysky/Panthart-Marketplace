@@ -243,6 +243,7 @@ export default async function Page(ctx: PageContext) {
                         className="w-full h-full object-cover"
                         playsInline
                         muted
+                        autoPlay
                         loop
                       />
                     ) : (

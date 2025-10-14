@@ -48,16 +48,15 @@ export default function MintingNowCarousel() {
   };
 
   return (
-    <section className="w-full mb-20">
+    <section className="w-full my-20">
       <div className="flex w-full items-center justify-between px-2 lg:px-0">
         <h1 className="font-bold text-[1.2rem] lg:text-[2rem]">Minting Now</h1>
         {!isMobile && (
-          <Link href="/minting-now">
-            <Button variant="link" className="flex items-center gap-2 font-bold">
-              More Minting Now
-              <MoveRight />
-            </Button>
-          </Link>
+
+                  <Button asChild variant="secondary" size="sm">
+          <Link href="/minting-now">View all</Link>
+        </Button>  
+ 
         )}
       </div>
 
