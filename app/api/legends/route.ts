@@ -28,14 +28,34 @@ function isAddressLike(s: string | null | undefined) {
   return /^0x[0-9a-fA-F]{40}$/.test(x);
 }
 
-/** Tolerant converter -> bigint (handles "123.000…", Decimal, number). */
+/** Expand scientific notation like "5.198e+43" into a plain integer string. */
+function expandSci(s: string) {
+  const m = s.match(/^(-?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/);
+  if (!m) return s;
+  const sign = m[1] || "";
+  const ip = m[2] || "0";
+  const fp = m[3] || "";
+  const exp = parseInt(m[4] || "0", 10);
+
+  if (exp >= 0) {
+    const need = exp - fp.length;
+    if (need >= 0) return sign + ip + fp + "0".repeat(need);
+    const all = ip + fp;
+    const pos = ip.length + exp;
+    return sign + all.slice(0, pos); // integer truncate
+  } else {
+    // negative exponent => value < 1 → integer domain is 0 / -0
+    return sign + "0";
+  }
+}
+
+/** Robust -> bigint (Decimal | number | string, incl. scientific). */
 function toBigIntTolerant(v: any): bigint {
   if (v == null) return 0n;
-  const s = v.toString().trim();
-  // Ensure we only grab the integer portion and avoid scientific notation
+  let s = v.toString().trim();
+  if (/e/i.test(s)) s = expandSci(s);
   const m = s.match(/^(-?\d+)/);
-  if (m && m[1] !== "" && m[1] !== "-" && m[1] !== "-0") return BigInt(m[1]);
-  return 0n;
+  return BigInt(m ? m[1] : "0");
 }
 
 // Pending = (accPerToken(1e27) - lastAccPerToken(1e27)) * comrades / 1e9 → 1e18 units
@@ -102,7 +122,7 @@ export async function GET(req: Request) {
     );
   }
 
-  // 3) Total comrades (TEXT → bigint). Keep as TEXT to avoid bigint overflows.
+  // 3) Total comrades (TEXT → bigint). Keep as TEXT to avoid bigint overflows in transport.
   const totalRows = await prisma.$queryRaw<Array<{ total_comrades: string }>>`
     SELECT (COUNT(*)::numeric(78,0))::text AS total_comrades
     FROM "NFT" n
@@ -112,14 +132,14 @@ export async function GET(req: Request) {
   `;
   const totalComrades = toBigIntTolerant(totalRows[0]?.total_comrades);
 
-  // 4) Current accPerToken for this currency (1e27) — Decimal → bigint
+  // 4) Current accPerToken for this currency (1e27) — Decimal → bigint (robust)
   const accRow = await prisma.rewardAccumulatorMulti.findFirst({
     where: { currencyId: currency.id },
     select: { accPerToken: true, updatedAt: true },
   });
-  const accPerToken1e27 = toBigIntTolerant(accRow?.accPerToken);
+  const accPerToken1e27 = toBigIntTolerant(accRow?.accPerToken?.toString());
 
-  // 5) Pool distributed so far — keep everything NUMERIC → TEXT (no ::bigint).
+  // 5) Pool distributed so far — NUMERIC → TEXT (avoid sci-notation)
   const poolRows = await prisma.$queryRaw<Array<{ sum_amt: string }>>`
     SELECT COALESCE( (SUM(rdl.amount)::numeric(78,0))::text, '0') AS sum_amt
     FROM "RewardDistributionLog" rdl
@@ -135,14 +155,12 @@ export async function GET(req: Request) {
       currency,
       accPerToken1e27: accPerToken1e27.toString(),
       poolDistributedWei: poolDistWei.toString(),
-      // NOTE: Number() is for UI convenience; if values can exceed JS safe range, format on the client.
       poolDistributedHuman: Number(poolDistWei) / 1e18,
       shareRate: 0.015,
     });
   }
 
   // 6) Page of holders (ranked by comrades)
-  // Return comrades as TEXT; sort in SQL by COUNT directly.
   const pageRows = await prisma.$queryRaw<LegendsRow[]>`
     SELECT
       u.id,
@@ -162,7 +180,7 @@ export async function GET(req: Request) {
 
   const walletAddresses = pageRows.map((r) => r.walletAddress);
 
-  // 7) Holder reward rows
+  // 7) Holder reward rows (do NOT modify casing in DB; just map by lowercase locally)
   const holderRows = await prisma.holderRewardMulti.findMany({
     where: { walletAddress: { in: walletAddresses }, currencyId: currency.id },
     select: { walletAddress: true, lastAccPerToken: true, claimedAmount: true },
@@ -173,22 +191,22 @@ export async function GET(req: Request) {
   const data = pageRows.map((r, i) => {
     const comrades = toBigIntTolerant(r.comrades);
     const meta = holderMap.get(r.walletAddress.toLowerCase());
-    const lastAcc1e27 = toBigIntTolerant(meta?.lastAccPerToken);
-    const claimedWei  = toBigIntTolerant(meta?.claimedAmount);
+    const lastAcc1e27 = toBigIntTolerant(meta?.lastAccPerToken?.toString());
+    const claimedWei = toBigIntTolerant(meta?.claimedAmount?.toString());
 
-    const delta = accPerToken1e27 > lastAcc1e27 ? (accPerToken1e27 - lastAcc1e27) : 0n;
+    const delta = accPerToken1e27 > lastAcc1e27 ? accPerToken1e27 - lastAcc1e27 : 0n;
     const pending = pendingWei(delta, comrades);
     const totalWei = claimedWei + pending;
 
     return {
       rank: offset + i + 1,
       userId: r.id,
-      walletAddress: r.walletAddress,
+      walletAddress: r.walletAddress, // preserve original casing
       username: r.username,
       profileAvatar: r.profileAvatar,
       comrades: Number(comrades),
       feeShareWei: totalWei.toString(),
-      // For very large values you may want to format server-side with a decimal lib instead of Number()
+      // NOTE: Number() is for UI convenience; very large values will lose precision.
       feeShareHuman: Number(totalWei) / 1e18,
     };
   });

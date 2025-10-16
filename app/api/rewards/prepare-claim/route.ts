@@ -9,14 +9,14 @@ import prisma, { prismaReady } from "@/lib/db";
  * Prepare a signed claim for the RewardsDistributor (EIP-712).
  * GET /api/rewards/prepare-claim?account=0x...&currency=ETN|0xToken
  *
- * - Resolves currency (native if omitted/ETN).
- * - Counts comrades (NFC NFTs) for the account.
- * - Loads accPerToken(1e27), computes TOTAL(1e18 normalized).
- * - Calls signer service to sign {account, token, total, deadline}.
+ * - Does NOT lowercase any address or contract string.
+ * - DB comparisons are case-insensitive (citext / Prisma mode:"insensitive").
+ * - Computes TOTAL entitlement in 1e18 units:
+ *     total = comrades * accPerToken(1e27) / 1e9
  */
 
 const ZERO = "0x0000000000000000000000000000000000000000";
-const EXTRA_1e9 = 10n ** 9n;
+const ONE_E9 = 1_000_000_000n;
 
 type CurrencyPick = {
   id: string;
@@ -32,33 +32,34 @@ const currencySelect = {
   tokenAddress: true,
 } as const;
 
-function toBigIntSafe(x?: string | null) {
-  if (!x) return 0n;
-  return BigInt(x);
+function isHexAddressCaseAgnostic(s: string): boolean {
+  return /^0x[0-9a-fA-F]{40}$/.test(s);
 }
 
-function isHexAddrLower(s: string) {
-  return /^0x[a-f0-9]{40}$/.test(s);
+/** BigInt-safe converter from Decimal/number/string to integer BigInt. */
+function toBigIntIntPortion(v: any): bigint {
+  if (v == null) return 0n;
+  if (typeof v === "bigint") return v;
+  const s = v.toString().trim();
+  if (s.startsWith("0x") || s.startsWith("0X")) return BigInt(s); // hex ints
+  const m = s.match(/^(-?\d+)/); // grab integer part only
+  return BigInt(m ? m[1] : "0");
 }
 
 export async function GET(req: Request) {
   await prismaReady;
 
   const url = new URL(req.url);
-  const accountRaw = (url.searchParams.get("account") || "").trim();
+  const account = (url.searchParams.get("account") || "").trim();
   const currencyParamRaw = (url.searchParams.get("currency") || "").trim();
 
-  // Normalize & validate account
-  const account = accountRaw.toLowerCase();
-  if (!isHexAddrLower(account)) {
+  // Validate account format, but DO NOT change its case
+  if (!isHexAddressCaseAgnostic(account)) {
     return NextResponse.json({ error: "bad account" }, { status: 400 });
   }
 
-  // 1) Resolve currency
-  // - If param looks like an address → match tokenAddress (case-insensitive)
-  // - Else if param is empty or "ETN" → native (tokenAddress = null, active = true)
-  // - Else → match by symbol (case-insensitive, active = true)
-  const isAddrLike = /^0x[0-9a-fA-F]{40}$/.test(currencyParamRaw);
+  // 1) Resolve currency (no lowercasing of inputs; lookups are case-insensitive)
+  const isAddrLike = isHexAddressCaseAgnostic(currencyParamRaw);
   const currencyParam = currencyParamRaw || "ETN";
 
   let currency: CurrencyPick | null = null;
@@ -72,7 +73,7 @@ export async function GET(req: Request) {
       select: currencySelect,
     });
   } else if (!currencyParamRaw || currencyParam.toUpperCase() === "ETN") {
-    // Native currency by convention: tokenAddress = null, active = true
+    // Native currency: tokenAddress = null
     currency = await prisma.currency.findFirst({
       where: { tokenAddress: null, active: true },
       select: currencySelect,
@@ -94,7 +95,7 @@ export async function GET(req: Request) {
     );
   }
 
-  // 2) NFC collection contract
+  // 2) NFC collection contract (kept exactly as stored)
   let CONTRACT = process.env.PANTHART_NFC_CONTRACT?.trim();
   if (!CONTRACT) {
     const col = await prisma.collection.findFirst({
@@ -107,8 +108,8 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "collection not configured" }, { status: 500 });
   }
 
-  // 3) Comrades (owned NFTs in that collection by this account)
-  const rows = await prisma.$queryRaw<Array<{ comrades: bigint }>>`
+  // 3) Comrades owned by this exact account (case-insensitive compare via citext)
+  const comradesRows = await prisma.$queryRaw<Array<{ comrades: bigint }>>`
     SELECT COUNT(*)::bigint AS comrades
     FROM "NFT" n
     JOIN "User" u ON u.id = n."ownerId"
@@ -116,19 +117,19 @@ export async function GET(req: Request) {
       AND n.status   = 'SUCCESS'::"NftStatus"
       AND u."walletAddress" = ${account}::citext
   `;
-  const comrades = rows[0]?.comrades ?? 0n;
+  const comrades = comradesRows[0]?.comrades ?? 0n;
 
-  // 4) Accumulator (1e27)
+  // 4) Accumulator (1e27 fixed)
   const acc = await prisma.rewardAccumulatorMulti.findFirst({
     where: { currencyId: currency.id },
     select: { accPerToken: true },
   });
-  const accPerToken1e27 = toBigIntSafe(acc?.accPerToken?.toString() ?? "0");
+  const accPerToken1e27 = toBigIntIntPortion(acc?.accPerToken);
 
-  // 5) TOTAL entitlement (1e18 normalized) = comrades * accPerToken / 1e9
-  const totalWei = (comrades * accPerToken1e27) / EXTRA_1e9;
+  // 5) TOTAL entitlement (1e18) = comrades * accPerToken / 1e9
+  const totalWei = (comrades * accPerToken1e27) / ONE_E9;
 
-  // 6) Ask signer service to sign the claim
+  // 6) Ask signer service to sign the claim. Use the token address *as stored*.
   const tokenAddr = currency.tokenAddress ? currency.tokenAddress : ZERO;
 
   const now = Math.floor(Date.now() / 1000);
@@ -139,6 +140,7 @@ export async function GET(req: Request) {
   if (!base) {
     return NextResponse.json({ error: "signer_not_configured" }, { status: 500 });
   }
+
   const signUrl = `${base}/sign`;
   const auth = process.env.SIGNER_SERVICE_TOKEN || "";
 
@@ -149,8 +151,8 @@ export async function GET(req: Request) {
       ...(auth ? { authorization: `Bearer ${auth}` } : {}),
     },
     body: JSON.stringify({
-      account,
-      token: tokenAddr,
+      account,           // exact casing from user
+      token: tokenAddr,  // exact casing from DB (or ZERO)
       total: totalWei.toString(),
       deadline,
     }),
@@ -170,11 +172,11 @@ export async function GET(req: Request) {
     currency: {
       symbol: currency.symbol,
       decimals: currency.decimals,
-      tokenAddress: tokenAddr,
+      tokenAddress: tokenAddr, // unchanged
     },
-    account,
-    total: totalWei.toString(),
+    account,                     // unchanged
+    total: totalWei.toString(),  // 1e18 units
     deadline,
-    signature: signed.signature, // EIP-712 signature from signer service
+    signature: signed.signature, // EIP-712 signature
   });
 }
