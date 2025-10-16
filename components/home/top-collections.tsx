@@ -92,7 +92,7 @@ export default function TopCollections({ initialCollections = [] as TopItem[] })
     KEY,
     fetcher,
     {
-      refreshInterval: 180_000,
+      refreshInterval: 300_000,
       revalidateOnFocus: true,
       keepPreviousData: true as any,
       fallbackData: { collections: initialCollections },

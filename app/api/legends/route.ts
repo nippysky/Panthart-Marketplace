@@ -6,23 +6,42 @@ import { NextResponse } from "next/server";
 import prisma, { prismaReady } from "@/lib/db";
 
 /**
- * Legends API
- * GET /api/legends?limit=25&offset=0
+ * Legends API (multi-currency)
+ * GET /api/legends?limit=25&offset=0&currency=ETN | 0xTokenAddr
  *
- * Leaderboard of current holders for the
- * "Non-Fungible Comrades" collection:
- *  - rank, username, avatar, walletAddress
- *  - comrades (current NFTs held for this contract)
- *  - feeShareEtn (pro-rata from 1.5% of all SOLD listings in this collection)
+ * DB scales:
+ * - amounts @ 1e18 (Decimal(78,18)) — treat as integer-like
+ * - accPerToken @ 1e27 (Decimal(78,27)) — treat as integer-like
  */
 
 type LegendsRow = {
   id: string;
-  walletAddress: string;     // selected with explicit alias
+  walletAddress: string;
   username: string;
-  profileAvatar: string | null; // selected with explicit alias
-  comrades: bigint;
+  profileAvatar: string | null;
+  comrades: string; // returned as TEXT from SQL (we sort via COUNT() directly)
 };
+
+function isAddressLike(s: string | null | undefined) {
+  if (!s) return false;
+  const x = s.trim();
+  return /^0x[0-9a-fA-F]{40}$/.test(x);
+}
+
+/** Tolerant converter -> bigint (handles "123.000…", Decimal, number). */
+function toBigIntTolerant(v: any): bigint {
+  if (v == null) return 0n;
+  const s = v.toString().trim();
+  const m = s.match(/^(-?\d+)/);
+  if (m && m[1] !== "" && m[1] !== "-" && m[1] !== "-0") return BigInt(m[1]);
+  return 0n;
+}
+
+// Pending = (accPerToken(1e27) - lastAccPerToken(1e27)) * comrades / 1e9 → 1e18 units
+function pendingWei(deltaAccPerToken1e27: bigint, comrades: bigint): bigint {
+  if (deltaAccPerToken1e27 <= 0n || comrades <= 0n) return 0n;
+  return (deltaAccPerToken1e27 * comrades) / 1_000_000_000n; // 1e27 / 1e9 = 1e18
+}
 
 export async function GET(req: Request) {
   await prismaReady;
@@ -30,88 +49,140 @@ export async function GET(req: Request) {
   const url = new URL(req.url);
   const limit = Math.min(Math.max(Number(url.searchParams.get("limit") ?? 25), 1), 100);
   const offset = Math.max(Number(url.searchParams.get("offset") ?? 0), 0);
+  const currencyParam = (url.searchParams.get("currency") || "").trim() || null;
 
-  // 1) Resolve the contract address
+  // 1) NFC contract
   let CONTRACT = process.env.PANTHART_NFC_CONTRACT?.trim();
-
   if (!CONTRACT) {
-    // Fallback by collection name (case-insensitive)
     const col = await prisma.collection.findFirst({
       where: { name: { equals: "Non-Fungible Comrades", mode: "insensitive" } },
       select: { contract: true },
     });
-    if (col?.contract) {
-      CONTRACT = col.contract;
-    } else {
-      return NextResponse.json(
+    if (!col?.contract) {
+      const res = NextResponse.json(
         { error: "Missing PANTHART_NFC_CONTRACT env and collection not found by name." },
         { status: 500 }
       );
+      res.headers.set("x-legends-api-version", "v3-sql");
+      return res;
     }
+    CONTRACT = col.contract;
   }
 
-  // 2) Total comrades currently held for this contract
-  //    (NFTs with ownerId present, status SUCCESS)
-  const totalRows = await prisma.$queryRaw<Array<{ total_comrades: bigint }>>`
-    SELECT COUNT(*)::bigint AS total_comrades
-    FROM "NFT" n
-    WHERE n.contract = ${CONTRACT}::citext
-      AND n.status = 'SUCCESS'::"NftStatus"
-      AND n."ownerId" IS NOT NULL
-  `;
+  // 2) Currency
+  let currency:
+    | null
+    | {
+        id: string;
+        symbol: string;
+        decimals: number;
+        tokenAddress: string | null;
+      } = null;
 
-  const totalComrades = totalRows[0]?.total_comrades ?? BigInt(0);
-  if (totalComrades === BigInt(0)) {
-    return NextResponse.json({
-      holders: [],
-      nextOffset: null,
-      totalComrades: 0,
-      poolEtn: 0,
-      poolWei: "0",
-      shareRate: 0.015,
+  if (!currencyParam) {
+    currency = await prisma.currency.findFirst({
+      where: { kind: "NATIVE", tokenAddress: null, active: true },
+      select: { id: true, symbol: true, decimals: true, tokenAddress: true },
+    });
+  } else if (isAddressLike(currencyParam)) {
+    currency = await prisma.currency.findFirst({
+      where: { tokenAddress: currencyParam },
+      select: { id: true, symbol: true, decimals: true, tokenAddress: true },
+    });
+  } else {
+    currency = await prisma.currency.findFirst({
+      where: { symbol: { equals: currencyParam, mode: "insensitive" }, active: true },
+      select: { id: true, symbol: true, decimals: true, tokenAddress: true },
     });
   }
 
-  // 3) Sum of SOLD listing prices (wei) for this collection
-  const feeRows = await prisma.$queryRaw<Array<{ sum_wei: string | null }>>`
-    SELECT COALESCE(SUM(ml."priceEtnWei")::text, '0') AS sum_wei
-    FROM "MarketplaceListing" ml
-    JOIN "NFT" n ON n.id = ml."nftId"
+  if (!currency) {
+    const res = NextResponse.json(
+      { error: `Unknown or inactive currency: ${currencyParam ?? "(native)"}` },
+      { status: 400 }
+    );
+    res.headers.set("x-legends-api-version", "v3-sql");
+    return res;
+  }
+
+  // 3) Total comrades (TEXT → bigint)
+  const totalRows = await prisma.$queryRaw<Array<{ total_comrades: string }>>`
+    SELECT (COUNT(*)::bigint)::text AS total_comrades
+    FROM "NFT" n
     WHERE n.contract = ${CONTRACT}::citext
-      AND ml.status = 'SOLD'::"ListingStatus"
+      AND n.status   = 'SUCCESS'::"NftStatus"
+      AND n."ownerId" IS NOT NULL
   `;
-  const totalWei = BigInt(feeRows[0]?.sum_wei ?? "0");
+  const totalComrades = toBigIntTolerant(totalRows[0]?.total_comrades);
 
-  // 1.5% holder pool
-  const holderShareRate = 0.015;
-  const poolShareWei = (totalWei * BigInt(15)) / BigInt(1000); // 1.5%
-  const poolEtn = Number(poolShareWei) / 1e18; // displayed as float; wei preserved below
+  // 4) Current accPerToken for this currency (1e27) — Decimal → bigint
+  const accRow = await prisma.rewardAccumulatorMulti.findFirst({
+    where: { currencyId: currency.id },
+    select: { accPerToken: true, updatedAt: true },
+  });
+  const accPerToken1e27 = toBigIntTolerant(accRow?.accPerToken);
 
-  // 4) Page of holders (ranked by comrades desc, stable tie-breaker)
+  // 5) Pool distributed so far (force integer at DB level → TEXT → bigint)
+  const poolRows = await prisma.$queryRaw<Array<{ sum_amt: string }>>`
+    SELECT COALESCE( (SUM(rdl.amount)::numeric(78,0))::bigint::text, '0') AS sum_amt
+    FROM "RewardDistributionLog" rdl
+    WHERE rdl."currencyId" = ${currency.id}
+  `;
+  const poolDistWei = toBigIntTolerant(poolRows[0]?.sum_amt);
+
+  if (totalComrades === 0n) {
+    const res = NextResponse.json({
+      holders: [],
+      nextOffset: null,
+      totalComrades: 0,
+      currency,
+      accPerToken1e27: accPerToken1e27.toString(),
+      poolDistributedWei: poolDistWei.toString(),
+      poolDistributedHuman: Number(poolDistWei) / 1e18,
+      shareRate: 0.015,
+    });
+    res.headers.set("x-legends-api-version", "v3-sql");
+    return res;
+  }
+
+  // 6) Page of holders (ranked by comrades)
+  // NOTE: order by COUNT(n.*) (numeric), not the TEXT alias.
   const pageRows = await prisma.$queryRaw<LegendsRow[]>`
     SELECT
       u.id,
       u."walletAddress" AS "walletAddress",
       u.username,
       u."profileAvatar" AS "profileAvatar",
-      COUNT(n.*)::bigint AS comrades
+      (COUNT(n.*)::bigint)::text AS comrades
     FROM "NFT" n
     JOIN "User" u ON u.id = n."ownerId"
     WHERE n.contract = ${CONTRACT}::citext
-      AND n.status = 'SUCCESS'::"NftStatus"
+      AND n.status   = 'SUCCESS'::"NftStatus"
       AND n."ownerId" IS NOT NULL
     GROUP BY u.id
-    ORDER BY comrades DESC, u.id ASC
+    ORDER BY COUNT(n.*) DESC, u.id ASC
     LIMIT ${limit} OFFSET ${offset}
   `;
 
-  // 5) Shape & compute each holder’s proportional fee share
+  const walletAddresses = pageRows.map((r) => r.walletAddress);
+
+  // 7) Holder reward rows
+  const holderRows = await prisma.holderRewardMulti.findMany({
+    where: { walletAddress: { in: walletAddresses }, currencyId: currency.id },
+    select: { walletAddress: true, lastAccPerToken: true, claimedAmount: true },
+  });
+  const holderMap = new Map(holderRows.map((h) => [h.walletAddress.toLowerCase(), h]));
+
+  // 8) Compute page
   const data = pageRows.map((r, i) => {
-    const comradesNum = Number(r.comrades);
-    const ratio = comradesNum / Number(totalComrades);
-    // pro-rata wei, keep as bigint -> string for precision
-    const userWeiBig = BigInt(Math.floor(ratio * Number(poolShareWei)));
-    const userEtn = Number(userWeiBig) / 1e18;
+    const comrades = toBigIntTolerant(r.comrades);
+    const meta = holderMap.get(r.walletAddress.toLowerCase());
+    const lastAcc1e27 = toBigIntTolerant(meta?.lastAccPerToken);
+    const claimedWei  = toBigIntTolerant(meta?.claimedAmount);
+
+    const delta = accPerToken1e27 > lastAcc1e27 ? (accPerToken1e27 - lastAcc1e27) : 0n;
+    const pending = pendingWei(delta, comrades);
+    const totalWei = claimedWei + pending;
 
     return {
       rank: offset + i + 1,
@@ -119,20 +190,24 @@ export async function GET(req: Request) {
       walletAddress: r.walletAddress,
       username: r.username,
       profileAvatar: r.profileAvatar,
-      comrades: comradesNum,
-      feeShareWei: userWeiBig.toString(),
-      feeShareEtn: userEtn,
+      comrades: Number(comrades),
+      feeShareWei: totalWei.toString(),
+      feeShareHuman: Number(totalWei) / 1e18,
     };
   });
 
   const nextOffset = pageRows.length < limit ? null : offset + limit;
 
-  return NextResponse.json({
+  const res = NextResponse.json({
     holders: data,
     nextOffset,
     totalComrades: Number(totalComrades),
-    poolEtn,
-    poolWei: poolShareWei.toString(),
-    shareRate: holderShareRate,
+    currency,
+    accPerToken1e27: accPerToken1e27.toString(),
+    poolDistributedWei: poolDistWei.toString(),
+    poolDistributedHuman: Number(poolDistWei) / 1e18,
+    shareRate: 0.015,
   });
+  res.headers.set("x-legends-api-version", "v3-sql");
+  return res;
 }

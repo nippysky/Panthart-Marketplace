@@ -1,4 +1,3 @@
-// components/explore/legends/table/legends-table.tsx
 "use client";
 
 import * as React from "react";
@@ -10,18 +9,32 @@ import {
   getSortedRowModel,
   SortingState,
 } from "@tanstack/react-table";
-import { legendsColumns } from "./columns";
+import { makeLegendsColumns } from "./columns";
 import type { LegendRow } from "../index";
+import { useActiveAccount } from "thirdweb/react";
 
-/**
- * Desktop table — reused pattern from Explore Collections,
- * but typed for LegendRow.
- */
-export default function LegendsTable({ data }: { data: LegendRow[] }) {
+export default function LegendsTable({
+  data,
+  currencySymbol,
+}: {
+  data: LegendRow[];
+  currencySymbol: string;
+}) {
   const [sorting, setSorting] = React.useState<SortingState>([]);
+
+  // ✅ hooks used inside a React component — legal
+  const currentAccountLower =
+    (useActiveAccount()?.address || "").toLowerCase();
+
+  // ✅ pass the active account into the column factory
+  const columns = React.useMemo<ColumnDef<LegendRow, any>[]>(
+    () => makeLegendsColumns(currencySymbol, currentAccountLower),
+    [currencySymbol, currentAccountLower]
+  );
+
   const table = useReactTable({
     data,
-    columns: legendsColumns as ColumnDef<LegendRow, any>[],
+    columns,
     state: { sorting },
     onSortingChange: setSorting,
     getCoreRowModel: getCoreRowModel(),
