@@ -9,6 +9,7 @@ import { useActiveAccount } from "thirdweb/react";
 import { HandCoins } from "lucide-react";
 import { prepareAndClaim as _prepareAndClaim } from "../table/columns";
 import { getBadgeForCount } from "@/lib/legends/badges";
+import { formatTokenAmount } from "@/lib/utils/format";
 
 function shorten(addr: string) {
   return addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : "";
@@ -117,9 +118,9 @@ export default function LegendsMobileCards({
                 <div className="flex items-center justify-end gap-2">
                   <div className="text-right">
                     <small className="opacity-70">CLAIMABLE ({currencySymbol})</small>
-                    <div className="text-base font-semibold mt-1">
-                      {Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(u.feeShareHuman)}
-                    </div>
+               <div className="text-base font-semibold mt-1">
+  {formatTokenAmount(u.feeShareWei ?? "0", 18, 6)}
+</div>
                   </div>
                   {isSelf ? (
                     <button

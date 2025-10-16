@@ -10,6 +10,7 @@ import { useLoaderStore } from "@/lib/store/loader-store";
 import { createWalletClient, custom, defineChain, encodeFunctionData } from "viem";
 import { REWARD_DISTRIBUTOR_ABI } from "@/lib/abis/marketplace-core/rewardDistributorABI";
 import { getBadgeForCount } from "@/lib/legends/badges";
+import { formatTokenAmount } from "@/lib/utils/format";
 
 const EXPLORER =
   process.env.NEXT_PUBLIC_BLOCK_EXPLORER ||
@@ -216,41 +217,41 @@ export function makeLegendsColumns(
       enableSorting: true,
       size: 120,
     },
-    {
-      header: () => <div className="text-right w-full">Claimable</div>,
-      accessorKey: "feeShareHuman",
-      cell: ({ row }) => {
-        const v = row.original.feeShareHuman;
-        const isSelf =
-          !!currentAccountLower &&
-          row.original.walletAddress.toLowerCase() === currentAccountLower;
+{
+  header: () => <div className="text-right w-full">Claimable</div>,
+  accessorKey: "feeShareWei", // <- use the wei field as the accessor
+  cell: ({ row }) => {
+    const wei = row.original.feeShareWei ?? "0";
+    const isSelf =
+      !!currentAccountLower &&
+      row.original.walletAddress.toLowerCase() === currentAccountLower;
 
-        return (
-          <div className="w-full flex items-center justify-end gap-2">
-            <div className="font-semibold">
-              {Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(v)} {currencySymbol}
-            </div>
-            {isSelf ? (
-              <button
-                className="inline-flex items-center gap-1 text-xs rounded-md px-2 py-1 border hover:bg-muted"
-                onClick={() =>
-                  prepareAndClaim({
-                    account: row.original.walletAddress as `0x${string}`,
-                    currencySymbol,
-                    currencyParam: currencySymbol,
-                  })
-                }
-                title="Claim to this wallet"
-              >
-                <HandCoins className="w-4 h-4" />
-                Claim
-              </button>
-            ) : null}
-          </div>
-        );
-      },
-      enableSorting: true,
-    },
+    return (
+      <div className="w-full flex items-center justify-end gap-2">
+        <div className="font-semibold">
+          {formatTokenAmount(wei, 18, 6)} {currencySymbol}
+        </div>
+        {isSelf ? (
+          <button
+            className="inline-flex items-center gap-1 text-xs rounded-md px-2 py-1 border hover:bg-muted"
+            onClick={() =>
+              prepareAndClaim({
+                account: row.original.walletAddress as `0x${string}`,
+                currencySymbol,
+                currencyParam: currencySymbol,
+              })
+            }
+            title="Claim to this wallet"
+          >
+            <HandCoins className="w-4 h-4" />
+            Claim
+          </button>
+        ) : null}
+      </div>
+    );
+  },
+  enableSorting: true,
+},
   ];
 }
 

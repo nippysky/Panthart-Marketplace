@@ -32,6 +32,7 @@ function isAddressLike(s: string | null | undefined) {
 function toBigIntTolerant(v: any): bigint {
   if (v == null) return 0n;
   const s = v.toString().trim();
+  // Ensure we only grab the integer portion and avoid scientific notation
   const m = s.match(/^(-?\d+)/);
   if (m && m[1] !== "" && m[1] !== "-" && m[1] !== "-0") return BigInt(m[1]);
   return 0n;
@@ -59,12 +60,10 @@ export async function GET(req: Request) {
       select: { contract: true },
     });
     if (!col?.contract) {
-      const res = NextResponse.json(
+      return NextResponse.json(
         { error: "Missing PANTHART_NFC_CONTRACT env and collection not found by name." },
         { status: 500 }
       );
-      res.headers.set("x-legends-api-version", "v3-sql");
-      return res;
     }
     CONTRACT = col.contract;
   }
@@ -97,17 +96,15 @@ export async function GET(req: Request) {
   }
 
   if (!currency) {
-    const res = NextResponse.json(
+    return NextResponse.json(
       { error: `Unknown or inactive currency: ${currencyParam ?? "(native)"}` },
       { status: 400 }
     );
-    res.headers.set("x-legends-api-version", "v3-sql");
-    return res;
   }
 
-  // 3) Total comrades (TEXT → bigint)
+  // 3) Total comrades (TEXT → bigint). Keep as TEXT to avoid bigint overflows.
   const totalRows = await prisma.$queryRaw<Array<{ total_comrades: string }>>`
-    SELECT (COUNT(*)::bigint)::text AS total_comrades
+    SELECT (COUNT(*)::numeric(78,0))::text AS total_comrades
     FROM "NFT" n
     WHERE n.contract = ${CONTRACT}::citext
       AND n.status   = 'SUCCESS'::"NftStatus"
@@ -122,38 +119,37 @@ export async function GET(req: Request) {
   });
   const accPerToken1e27 = toBigIntTolerant(accRow?.accPerToken);
 
-  // 5) Pool distributed so far (force integer at DB level → TEXT → bigint)
+  // 5) Pool distributed so far — keep everything NUMERIC → TEXT (no ::bigint).
   const poolRows = await prisma.$queryRaw<Array<{ sum_amt: string }>>`
-    SELECT COALESCE( (SUM(rdl.amount)::numeric(78,0))::bigint::text, '0') AS sum_amt
+    SELECT COALESCE( (SUM(rdl.amount)::numeric(78,0))::text, '0') AS sum_amt
     FROM "RewardDistributionLog" rdl
     WHERE rdl."currencyId" = ${currency.id}
   `;
   const poolDistWei = toBigIntTolerant(poolRows[0]?.sum_amt);
 
   if (totalComrades === 0n) {
-    const res = NextResponse.json({
+    return NextResponse.json({
       holders: [],
       nextOffset: null,
       totalComrades: 0,
       currency,
       accPerToken1e27: accPerToken1e27.toString(),
       poolDistributedWei: poolDistWei.toString(),
+      // NOTE: Number() is for UI convenience; if values can exceed JS safe range, format on the client.
       poolDistributedHuman: Number(poolDistWei) / 1e18,
       shareRate: 0.015,
     });
-    res.headers.set("x-legends-api-version", "v3-sql");
-    return res;
   }
 
   // 6) Page of holders (ranked by comrades)
-  // NOTE: order by COUNT(n.*) (numeric), not the TEXT alias.
+  // Return comrades as TEXT; sort in SQL by COUNT directly.
   const pageRows = await prisma.$queryRaw<LegendsRow[]>`
     SELECT
       u.id,
       u."walletAddress" AS "walletAddress",
       u.username,
       u."profileAvatar" AS "profileAvatar",
-      (COUNT(n.*)::bigint)::text AS comrades
+      (COUNT(n.*)::numeric(78,0))::text AS comrades
     FROM "NFT" n
     JOIN "User" u ON u.id = n."ownerId"
     WHERE n.contract = ${CONTRACT}::citext
@@ -192,13 +188,14 @@ export async function GET(req: Request) {
       profileAvatar: r.profileAvatar,
       comrades: Number(comrades),
       feeShareWei: totalWei.toString(),
+      // For very large values you may want to format server-side with a decimal lib instead of Number()
       feeShareHuman: Number(totalWei) / 1e18,
     };
   });
 
   const nextOffset = pageRows.length < limit ? null : offset + limit;
 
-  const res = NextResponse.json({
+  return NextResponse.json({
     holders: data,
     nextOffset,
     totalComrades: Number(totalComrades),
@@ -208,6 +205,4 @@ export async function GET(req: Request) {
     poolDistributedHuman: Number(poolDistWei) / 1e18,
     shareRate: 0.015,
   });
-  res.headers.set("x-legends-api-version", "v3-sql");
-  return res;
 }
